@@ -1,0 +1,12 @@
+{
+  "indexes": [
+    {
+      "collectionGroup": "esign_documents",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "signNowDocumentId", "order": "ASCENDING" }
+      ]
+    }
+  ],
+  "fieldOverrides": []
+}

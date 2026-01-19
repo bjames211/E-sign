@@ -1,0 +1,18 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(firebase deploy:*)",
+      "Bash(gcloud services enable:*)",
+      "Bash(firebase functions:list:*)",
+      "Bash(firebase functions:delete:*)",
+      "Bash(firebase functions:log:*)",
+      "Bash(npm install:*)",
+      "Bash(npm run build:*)",
+      "Bash(npm uninstall:*)",
+      "Bash(gcloud functions logs read:*)",
+      "Bash(tac:*)",
+      "Bash(git add:*)",
+      "Bash(git commit -m \"$\\(cat <<''EOF''\nInitial commit: E-signature automation with SignNow\n\n- Firebase Cloud Functions for document processing\n- React frontend for upload form with installer selection\n- SignNow integration with template-based field placement\n- Support for Eagle Carports and American West Coast templates\n- Webhook endpoint for signature status updates\n\nCo-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>\nEOF\n\\)\")"
+    ]
+  }
+}
