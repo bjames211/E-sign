@@ -4,6 +4,7 @@ dotenv.config();
 import * as functions from 'firebase-functions/v1';
 import * as admin from 'firebase-admin';
 import { sendForSignature } from './signNowService';
+import { extractDataFromPdf } from './pdfExtractor';
 
 admin.initializeApp();
 
@@ -38,6 +39,26 @@ export const processEsignDocument = functions.firestore
       const file = bucket.file(data.storagePath);
       const [pdfBuffer] = await file.download();
 
+      // Extract data from PDF using Claude Vision
+      console.log('Extracting data from PDF...');
+      let extractedData = null;
+      try {
+        extractedData = await extractDataFromPdf(pdfBuffer, data.installer || 'Unknown');
+
+        // Store extracted data in Firestore for auditing
+        await db.collection('extracted_pdf_data').add({
+          documentId: docId,
+          fileName: data.fileName,
+          installer: data.installer,
+          signer: data.signer,
+          ...extractedData,
+          createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+        console.log('Extracted data saved to Firestore');
+      } catch (extractError) {
+        console.error('PDF extraction failed (continuing with signature):', extractError);
+      }
+
       // Send to SignNow
       const result = await sendForSignature({
         pdfBuffer,
@@ -52,6 +73,12 @@ export const processEsignDocument = functions.firestore
         status: 'sent',
         signNowDocumentId: result.documentId,
         signNowInviteId: result.inviteId,
+        extractedData: extractedData ? {
+          customerName: extractedData.customerName,
+          subtotal: extractedData.subtotal,
+          downPayment: extractedData.downPayment,
+          balanceDue: extractedData.balanceDue,
+        } : null,
         sentAt: admin.firestore.FieldValue.serverTimestamp(),
       });
 
