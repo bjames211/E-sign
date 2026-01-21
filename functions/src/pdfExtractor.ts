@@ -62,7 +62,7 @@ export async function extractDataFromPdf(
   "email": "email address",
   "phone": "phone number",
   "subtotal": numeric value (no $ sign),
-  "downPayment": numeric value (no $ sign),
+  "downPayment": numeric value (no $ sign) - NOTE: For American Carports, this may be labeled "Origination Fee" instead of "Down Payment" or "Deposit",
   "balanceDue": numeric value (no $ sign)
 }
 

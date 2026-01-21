@@ -142,6 +142,43 @@ async function copyFieldsFromTemplate(
   }
 }
 
+const WEBHOOK_URL = 'https://us-central1-e-sign-27f9a.cloudfunctions.net/signNowWebhook';
+
+/**
+ * Register webhook for document completion
+ */
+async function registerDocumentWebhook(
+  accessToken: string,
+  documentId: string
+): Promise<void> {
+  console.log('Registering webhook for document:', documentId);
+
+  try {
+    await axios.post(
+      `${SIGNNOW_API_BASE}/api/v2/events`,
+      {
+        event: 'document.complete',
+        entity_id: documentId,
+        action: 'callback',
+        attributes: {
+          callback: WEBHOOK_URL,
+        },
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          'Content-Type': 'application/json',
+        },
+      }
+    );
+    console.log('Webhook registered successfully');
+  } catch (error: any) {
+    console.error('Webhook registration failed:', error.response?.status);
+    console.error('Details:', JSON.stringify(error.response?.data, null, 2));
+    // Don't throw - webhook failure shouldn't stop the signing process
+  }
+}
+
 /**
  * Send signing invitation
  */
@@ -259,6 +296,9 @@ export async function sendForSignature(
     request.signerEmail,
     request.signerName
   );
+
+  // Register webhook for document completion
+  await registerDocumentWebhook(accessToken, documentId);
 
   console.log('\n========================================');
   console.log('SUCCESS!');

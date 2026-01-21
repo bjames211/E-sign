@@ -16,7 +16,21 @@
       "Bash(git remote:*)",
       "Bash(git remote add:*)",
       "Bash(git push:*)",
-      "Bash(node:*)"
+      "Bash(node:*)",
+      "Bash(git commit:*)",
+      "Bash(open \"https://console.firebase.google.com/project/e-sign-27f9a/firestore/databases/-default-/data/~2Fextracted_pdf_data\")",
+      "Bash(open \"https://e-sign-27f9a.web.app\")",
+      "Bash(npm run deploy:*)",
+      "Bash(curl:*)",
+      "Bash(npx mcp-google-sheets:*)",
+      "Bash(open \"https://sheets.new\")",
+      "Bash(open \"https://console.firebase.google.com/project/e-sign-27f9a/settings/serviceaccounts/adminsdk\")",
+      "Bash(gcloud auth application-default print-access-token:*)",
+      "Bash(ls:*)",
+      "Bash(open \"https://console.developers.google.com/apis/api/sheets.googleapis.com/overview?project=896222149181\")",
+      "Bash(firebase login:*)",
+      "Bash(open \"https://console.firebase.google.com\")",
+      "Bash(git check-ignore:*)"
     ]
   }
 }

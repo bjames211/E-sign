@@ -1,9 +1,11 @@
 import { useState, useEffect } from 'react';
 import { collection, query, orderBy, onSnapshot, Timestamp } from 'firebase/firestore';
 import { db } from '../config/firebase';
+import { ExtractedDataTable } from './ExtractedDataTable';
 
 interface Document {
   id: string;
+  orderNumber?: string;
   fileName: string;
   signer: {
     email: string;
@@ -27,6 +29,7 @@ const statusColors: Record<string, { bg: string; text: string }> = {
 export function Dashboard() {
   const [documents, setDocuments] = useState<Document[]>([]);
   const [loading, setLoading] = useState(true);
+  const [activeTab, setActiveTab] = useState<'documents' | 'extracted'>('documents');
 
   useEffect(() => {
     const q = query(
@@ -90,69 +93,96 @@ export function Dashboard() {
         </div>
       </div>
 
-      {/* Documents Table */}
-      <div style={styles.tableContainer}>
-        <div style={styles.tableHeader}>
-          <h2 style={styles.tableTitle}>Document Status</h2>
-        </div>
-        <table style={styles.table}>
-          <thead>
-            <tr>
-              <th style={styles.th}>Document</th>
-              <th style={styles.th}>Signer</th>
-              <th style={styles.th}>Status</th>
-              <th style={styles.th}>Created</th>
-              <th style={styles.th}>Sent</th>
-              <th style={styles.th}>Signed</th>
-            </tr>
-          </thead>
-          <tbody>
-            {loading ? (
-              <tr>
-                <td colSpan={6} style={styles.loading}>
-                  Loading documents...
-                </td>
-              </tr>
-            ) : documents.length === 0 ? (
-              <tr>
-                <td colSpan={6} style={styles.empty}>
-                  No documents yet. Upload your first PDF to get started.
-                </td>
-              </tr>
-            ) : (
-              documents.map((doc) => (
-                <tr key={doc.id} style={styles.tr}>
-                  <td style={styles.td}>
-                    <div style={styles.fileName}>{doc.fileName}</div>
-                    <div style={styles.docId}>{doc.id}</div>
-                  </td>
-                  <td style={styles.td}>
-                    <div style={styles.signerName}>{doc.signer.name}</div>
-                    <div style={styles.signerEmail}>{doc.signer.email}</div>
-                  </td>
-                  <td style={styles.td}>
-                    <span
-                      style={{
-                        ...styles.statusBadge,
-                        backgroundColor: statusColors[doc.status]?.bg || '#f5f5f5',
-                        color: statusColors[doc.status]?.text || '#333',
-                      }}
-                    >
-                      {getStatusLabel(doc.status)}
-                    </span>
-                    {doc.error && (
-                      <div style={styles.errorText}>{doc.error}</div>
-                    )}
-                  </td>
-                  <td style={styles.td}>{formatDate(doc.createdAt)}</td>
-                  <td style={styles.td}>{formatDate(doc.sentAt)}</td>
-                  <td style={styles.td}>{formatDate(doc.signedAt)}</td>
-                </tr>
-              ))
-            )}
-          </tbody>
-        </table>
+      {/* Tabs */}
+      <div style={styles.tabContainer}>
+        <button
+          style={{
+            ...styles.tab,
+            ...(activeTab === 'documents' ? styles.activeTab : {}),
+          }}
+          onClick={() => setActiveTab('documents')}
+        >
+          Document Status
+        </button>
+        <button
+          style={{
+            ...styles.tab,
+            ...(activeTab === 'extracted' ? styles.activeTab : {}),
+          }}
+          onClick={() => setActiveTab('extracted')}
+        >
+          AI Extracted Data
+        </button>
       </div>
+
+      {/* Tab Content */}
+      {activeTab === 'documents' ? (
+        <div style={styles.tableContainer}>
+          <table style={styles.table}>
+            <thead>
+              <tr>
+                <th style={styles.th}>Order #</th>
+                <th style={styles.th}>Document</th>
+                <th style={styles.th}>Signer</th>
+                <th style={styles.th}>Status</th>
+                <th style={styles.th}>Created</th>
+                <th style={styles.th}>Sent</th>
+                <th style={styles.th}>Signed</th>
+              </tr>
+            </thead>
+            <tbody>
+              {loading ? (
+                <tr>
+                  <td colSpan={7} style={styles.loading}>
+                    Loading documents...
+                  </td>
+                </tr>
+              ) : documents.length === 0 ? (
+                <tr>
+                  <td colSpan={7} style={styles.empty}>
+                    No documents yet. Upload your first PDF to get started.
+                  </td>
+                </tr>
+              ) : (
+                documents.map((doc) => (
+                  <tr key={doc.id} style={styles.tr}>
+                    <td style={styles.td}>
+                      <div style={styles.orderNumber}>{doc.orderNumber || '-'}</div>
+                    </td>
+                    <td style={styles.td}>
+                      <div style={styles.fileName}>{doc.fileName}</div>
+                      <div style={styles.docId}>{doc.id}</div>
+                    </td>
+                    <td style={styles.td}>
+                      <div style={styles.signerName}>{doc.signer.name}</div>
+                      <div style={styles.signerEmail}>{doc.signer.email}</div>
+                    </td>
+                    <td style={styles.td}>
+                      <span
+                        style={{
+                          ...styles.statusBadge,
+                          backgroundColor: statusColors[doc.status]?.bg || '#f5f5f5',
+                          color: statusColors[doc.status]?.text || '#333',
+                        }}
+                      >
+                        {getStatusLabel(doc.status)}
+                      </span>
+                      {doc.error && (
+                        <div style={styles.errorText}>{doc.error}</div>
+                      )}
+                    </td>
+                    <td style={styles.td}>{formatDate(doc.createdAt)}</td>
+                    <td style={styles.td}>{formatDate(doc.sentAt)}</td>
+                    <td style={styles.td}>{formatDate(doc.signedAt)}</td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        <ExtractedDataTable />
+      )}
     </div>
   );
 }
@@ -183,21 +213,33 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: 14,
     color: '#666',
   },
+  tabContainer: {
+    display: 'flex',
+    gap: 0,
+    marginBottom: 0,
+  },
+  tab: {
+    padding: '14px 24px',
+    fontSize: 14,
+    fontWeight: 600,
+    color: '#666',
+    backgroundColor: '#f5f5f5',
+    border: 'none',
+    borderTopLeftRadius: 12,
+    borderTopRightRadius: 12,
+    cursor: 'pointer',
+    transition: 'all 0.2s',
+  },
+  activeTab: {
+    backgroundColor: '#fff',
+    color: '#2196F3',
+    boxShadow: '0 -2px 8px rgba(0,0,0,0.06)',
+  },
   tableContainer: {
     backgroundColor: '#fff',
-    borderRadius: 12,
+    borderRadius: '0 12px 12px 12px',
     boxShadow: '0 2px 8px rgba(0,0,0,0.06)',
     overflow: 'hidden',
-  },
-  tableHeader: {
-    padding: '20px 24px',
-    borderBottom: '1px solid #e0e0e0',
-  },
-  tableTitle: {
-    margin: 0,
-    fontSize: 18,
-    fontWeight: 600,
-    color: '#333',
   },
   table: {
     width: '100%',
@@ -222,6 +264,11 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: 14,
     color: '#333',
     verticalAlign: 'top' as const,
+  },
+  orderNumber: {
+    fontWeight: 600,
+    color: '#2196F3',
+    fontFamily: 'monospace',
   },
   fileName: {
     fontWeight: 500,
