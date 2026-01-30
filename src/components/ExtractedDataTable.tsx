@@ -18,6 +18,12 @@ interface ExtractedData {
   subtotal: number | null;
   downPayment: number | null;
   balanceDue: number | null;
+  // Deposit validation fields
+  expectedDepositPercent: number | null;
+  expectedDepositAmount: number | null;
+  actualDepositPercent: number | null;
+  depositDiscrepancy: boolean;
+  depositDiscrepancyAmount: number | null;
   createdAt: Timestamp;
 }
 
@@ -48,9 +54,25 @@ export function ExtractedDataTable() {
     return `$${value.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
   };
 
-  const formatDate = (timestamp?: Timestamp) => {
+  const formatDate = (timestamp?: Timestamp | any) => {
     if (!timestamp) return '-';
-    return timestamp.toDate().toLocaleString();
+    try {
+      let date: Date;
+      if (timestamp.toDate && typeof timestamp.toDate === 'function') {
+        date = timestamp.toDate();
+      } else if (timestamp.seconds) {
+        date = new Date(timestamp.seconds * 1000);
+      } else if (timestamp instanceof Date) {
+        date = timestamp;
+      } else if (typeof timestamp === 'number') {
+        date = new Date(timestamp);
+      } else {
+        return '-';
+      }
+      return date.toLocaleString();
+    } catch {
+      return '-';
+    }
   };
 
   return (
@@ -65,6 +87,8 @@ export function ExtractedDataTable() {
               <th style={styles.th}>Contact</th>
               <th style={styles.th}>Subtotal</th>
               <th style={styles.th}>Down Payment</th>
+              <th style={styles.th}>Expected</th>
+              <th style={styles.th}>Deposit Check</th>
               <th style={styles.th}>Balance Due</th>
               <th style={styles.th}>Extracted</th>
             </tr>
@@ -72,13 +96,13 @@ export function ExtractedDataTable() {
           <tbody>
             {loading ? (
               <tr>
-                <td colSpan={8} style={styles.loading}>
+                <td colSpan={10} style={styles.loading}>
                   Loading extracted data...
                 </td>
               </tr>
             ) : extractedData.length === 0 ? (
               <tr>
-                <td colSpan={8} style={styles.empty}>
+                <td colSpan={10} style={styles.empty}>
                   No extracted data yet. Upload a PDF to see AI-extracted information here.
                 </td>
               </tr>
@@ -107,6 +131,30 @@ export function ExtractedDataTable() {
                   </td>
                   <td style={styles.tdMoney}>
                     <span style={styles.money}>{formatCurrency(data.downPayment)}</span>
+                    {data.actualDepositPercent && (
+                      <div style={styles.percent}>{data.actualDepositPercent}%</div>
+                    )}
+                  </td>
+                  <td style={styles.tdMoney}>
+                    <span style={styles.money}>{formatCurrency(data.expectedDepositAmount)}</span>
+                    {data.expectedDepositPercent && (
+                      <div style={styles.percent}>{data.expectedDepositPercent}%</div>
+                    )}
+                  </td>
+                  <td style={styles.td}>
+                    {data.depositDiscrepancy ? (
+                      <div style={styles.discrepancyBad}>
+                        ⚠️ OFF
+                        <div style={styles.discrepancyAmount}>
+                          {data.depositDiscrepancyAmount && data.depositDiscrepancyAmount > 0 ? '+' : ''}
+                          {formatCurrency(data.depositDiscrepancyAmount)}
+                        </div>
+                      </div>
+                    ) : data.expectedDepositAmount ? (
+                      <div style={styles.discrepancyOk}>✓ OK</div>
+                    ) : (
+                      <span style={styles.noData}>-</span>
+                    )}
                   </td>
                   <td style={styles.tdMoney}>
                     <span style={{ ...styles.money, ...styles.balanceDue }}>
@@ -226,6 +274,28 @@ const styles: Record<string, React.CSSProperties> = {
   balanceDue: {
     color: '#c62828',
     fontWeight: 600,
+  },
+  percent: {
+    fontSize: 11,
+    color: '#888',
+    marginTop: 2,
+  },
+  discrepancyOk: {
+    color: '#2e7d32',
+    fontWeight: 600,
+    fontSize: 13,
+  },
+  discrepancyBad: {
+    color: '#c62828',
+    fontWeight: 600,
+    fontSize: 13,
+  },
+  discrepancyAmount: {
+    fontSize: 11,
+    marginTop: 2,
+  },
+  noData: {
+    color: '#999',
   },
   date: {
     fontSize: 12,

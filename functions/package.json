@@ -22,7 +22,8 @@
     "form-data": "^4.0.0",
     "googleapis": "^170.1.0",
     "pdf-lib": "^1.17.1",
-    "pdf2json": "^4.0.2"
+    "pdf2json": "^4.0.2",
+    "stripe": "^14.10.0"
   },
   "devDependencies": {
     "@types/node": "^18.0.0",

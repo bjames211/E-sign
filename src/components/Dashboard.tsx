@@ -11,11 +11,23 @@ interface Document {
     email: string;
     name: string;
   };
-  status: 'pending' | 'processing' | 'sent' | 'signed' | 'error';
+  status: 'pending' | 'processing' | 'sent' | 'signed' | 'error' | 'pending_approval';
   createdAt: Timestamp;
   sentAt?: Timestamp;
   signedAt?: Timestamp;
   error?: string;
+  approvalRequired?: boolean;
+  approvalReason?: string;
+  extractedData?: {
+    customerName?: string;
+    subtotal?: number;
+    downPayment?: number;
+    expectedDepositAmount?: number;
+    expectedDepositPercent?: number;
+    actualDepositPercent?: number;
+    depositDiscrepancy?: boolean;
+    depositDiscrepancyAmount?: number;
+  };
 }
 
 const statusColors: Record<string, { bg: string; text: string }> = {
@@ -24,12 +36,45 @@ const statusColors: Record<string, { bg: string; text: string }> = {
   sent: { bg: '#e8f5e9', text: '#2e7d32' },
   signed: { bg: '#c8e6c9', text: '#1b5e20' },
   error: { bg: '#ffebee', text: '#c62828' },
+  pending_approval: { bg: '#fff3e0', text: '#f57c00' },
 };
+
+const APPROVE_FUNCTION_URL = 'https://us-central1-e-sign-27f9a.cloudfunctions.net/approveAndSend';
 
 export function Dashboard() {
   const [documents, setDocuments] = useState<Document[]>([]);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<'documents' | 'extracted'>('documents');
+  const [approvingId, setApprovingId] = useState<string | null>(null);
+
+  const handleApprove = async (docId: string) => {
+    if (!confirm('Are you sure you want to send this document despite the deposit discrepancy?')) {
+      return;
+    }
+
+    setApprovingId(docId);
+    try {
+      const response = await fetch(APPROVE_FUNCTION_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          documentId: docId,
+          approvedBy: 'user', // Could be enhanced with actual user info
+        }),
+      });
+
+      const result = await response.json();
+      if (!response.ok) {
+        throw new Error(result.error || 'Approval failed');
+      }
+
+      alert('Document approved and sent for signature!');
+    } catch (error) {
+      alert(`Error: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    } finally {
+      setApprovingId(null);
+    }
+  };
 
   useEffect(() => {
     const q = query(
@@ -49,9 +94,25 @@ export function Dashboard() {
     return unsubscribe;
   }, []);
 
-  const formatDate = (timestamp?: Timestamp) => {
+  const formatDate = (timestamp?: Timestamp | any) => {
     if (!timestamp) return '-';
-    return timestamp.toDate().toLocaleString();
+    try {
+      let date: Date;
+      if (timestamp.toDate && typeof timestamp.toDate === 'function') {
+        date = timestamp.toDate();
+      } else if (timestamp.seconds) {
+        date = new Date(timestamp.seconds * 1000);
+      } else if (timestamp instanceof Date) {
+        date = timestamp;
+      } else if (typeof timestamp === 'number') {
+        date = new Date(timestamp);
+      } else {
+        return '-';
+      }
+      return date.toLocaleString();
+    } catch {
+      return '-';
+    }
   };
 
   const getStatusLabel = (status: string) => {
@@ -61,6 +122,7 @@ export function Dashboard() {
       sent: 'Awaiting Signature',
       signed: 'Completed',
       error: 'Error',
+      pending_approval: '⚠️ Needs Approval',
     };
     return labels[status] || status;
   };
@@ -74,10 +136,10 @@ export function Dashboard() {
           <div style={styles.statLabel}>Total Documents</div>
         </div>
         <div style={styles.statCard}>
-          <div style={{ ...styles.statValue, color: '#e65100' }}>
-            {documents.filter((d) => d.status === 'pending' || d.status === 'processing').length}
+          <div style={{ ...styles.statValue, color: '#f57c00' }}>
+            {documents.filter((d) => d.status === 'pending_approval').length}
           </div>
-          <div style={styles.statLabel}>Processing</div>
+          <div style={styles.statLabel}>Needs Approval</div>
         </div>
         <div style={styles.statCard}>
           <div style={{ ...styles.statValue, color: '#2e7d32' }}>
@@ -169,6 +231,29 @@ export function Dashboard() {
                       </span>
                       {doc.error && (
                         <div style={styles.errorText}>{doc.error}</div>
+                      )}
+                      {doc.status === 'pending_approval' && (
+                        <div style={styles.approvalBox}>
+                          <div style={styles.approvalWarning}>
+                            Deposit discrepancy detected
+                          </div>
+                          {doc.extractedData && (
+                            <div style={styles.approvalDetails}>
+                              <div>Expected: ${doc.extractedData.expectedDepositAmount} ({doc.extractedData.expectedDepositPercent}%)</div>
+                              <div>Actual: ${doc.extractedData.downPayment} ({doc.extractedData.actualDepositPercent}%)</div>
+                              <div style={styles.discrepancyAmount}>
+                                Difference: ${doc.extractedData.depositDiscrepancyAmount}
+                              </div>
+                            </div>
+                          )}
+                          <button
+                            style={styles.approveButton}
+                            onClick={() => handleApprove(doc.id)}
+                            disabled={approvingId === doc.id}
+                          >
+                            {approvingId === doc.id ? 'Sending...' : 'Send Anyway'}
+                          </button>
+                        </div>
                       )}
                     </td>
                     <td style={styles.td}>{formatDate(doc.createdAt)}</td>
@@ -309,5 +394,39 @@ const styles: Record<string, React.CSSProperties> = {
     padding: 40,
     textAlign: 'center' as const,
     color: '#999',
+  },
+  approvalBox: {
+    marginTop: 10,
+    padding: 12,
+    backgroundColor: '#fff8e1',
+    borderRadius: 8,
+    border: '1px solid #ffcc02',
+  },
+  approvalWarning: {
+    fontWeight: 600,
+    color: '#e65100',
+    fontSize: 13,
+    marginBottom: 8,
+  },
+  approvalDetails: {
+    fontSize: 12,
+    color: '#666',
+    lineHeight: 1.6,
+  },
+  discrepancyAmount: {
+    fontWeight: 600,
+    color: '#c62828',
+    marginTop: 4,
+  },
+  approveButton: {
+    marginTop: 10,
+    padding: '8px 16px',
+    backgroundColor: '#f57c00',
+    color: '#fff',
+    border: 'none',
+    borderRadius: 6,
+    fontWeight: 600,
+    fontSize: 13,
+    cursor: 'pointer',
   },
 };

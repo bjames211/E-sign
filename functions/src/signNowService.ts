@@ -308,3 +308,127 @@ export async function sendForSignature(
 
   return { documentId, inviteId };
 }
+
+/**
+ * Cancel a signing invite in SignNow
+ * This prevents the signer from completing the signature
+ * Handles both freeform invites and field invites
+ */
+export async function cancelSigningInvite(
+  signNowDocumentId: string
+): Promise<{ success: boolean; message: string }> {
+  try {
+    const accessToken = await getAccessToken();
+
+    // First, get the document to find all invites
+    const docResponse = await axios.get(
+      `${SIGNNOW_API_BASE}/document/${signNowDocumentId}`,
+      {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+        },
+      }
+    );
+
+    const fieldInvites = docResponse.data.field_invites || [];
+    const freeformInvites = docResponse.data.requests || []; // Freeform invites are in 'requests'
+
+    let cancelledCount = 0;
+
+    // Cancel field invites
+    for (const invite of fieldInvites) {
+      if (invite.status === 'pending') {
+        try {
+          await axios.delete(
+            `${SIGNNOW_API_BASE}/document/${signNowDocumentId}/fieldinvite/${invite.id}`,
+            {
+              headers: {
+                Authorization: `Bearer ${accessToken}`,
+              },
+            }
+          );
+          console.log(`Cancelled field invite ${invite.id} for document ${signNowDocumentId}`);
+          cancelledCount++;
+        } catch (err: any) {
+          console.warn(`Failed to cancel field invite ${invite.id}:`, err.response?.data || err.message);
+        }
+      }
+    }
+
+    // Cancel freeform invites (signing requests)
+    for (const invite of freeformInvites) {
+      if (invite.status === 'pending' || !invite.status) {
+        try {
+          await axios.delete(
+            `${SIGNNOW_API_BASE}/document/${signNowDocumentId}/invite/${invite.id}`,
+            {
+              headers: {
+                Authorization: `Bearer ${accessToken}`,
+              },
+            }
+          );
+          console.log(`Cancelled freeform invite ${invite.id} for document ${signNowDocumentId}`);
+          cancelledCount++;
+        } catch (err: any) {
+          console.warn(`Failed to cancel freeform invite ${invite.id}:`, err.response?.data || err.message);
+        }
+      }
+    }
+
+    // Also try to cancel via the cancel-invite endpoint (covers all invite types)
+    try {
+      await axios.put(
+        `${SIGNNOW_API_BASE}/document/${signNowDocumentId}/fieldinvitecancel`,
+        {},
+        {
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+          },
+        }
+      );
+      console.log(`Cancelled all field invites via bulk cancel for document ${signNowDocumentId}`);
+    } catch (bulkCancelErr: any) {
+      // This endpoint might not exist or might fail - that's ok
+      console.log('Bulk cancel attempt:', bulkCancelErr.response?.status || 'failed');
+    }
+
+    if (cancelledCount === 0 && fieldInvites.length === 0 && freeformInvites.length === 0) {
+      return { success: false, message: 'No signing invites found for this document' };
+    }
+
+    return { success: true, message: `Cancelled ${cancelledCount} signing invite(s) successfully` };
+  } catch (error: any) {
+    console.error('Failed to cancel signing invite:', error.response?.data || error.message);
+    return {
+      success: false,
+      message: error.response?.data?.message || error.message || 'Failed to cancel signing invite'
+    };
+  }
+}
+
+/**
+ * Download a signed document from SignNow
+ */
+export async function downloadSignedDocument(
+  signNowDocumentId: string
+): Promise<Buffer | null> {
+  try {
+    const accessToken = await getAccessToken();
+
+    const response = await axios.get(
+      `${SIGNNOW_API_BASE}/document/${signNowDocumentId}/download?type=collapsed`,
+      {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+        },
+        responseType: 'arraybuffer',
+      }
+    );
+
+    console.log('Downloaded signed document from SignNow');
+    return Buffer.from(response.data);
+  } catch (error: any) {
+    console.error('Failed to download signed document:', error.response?.status);
+    return null;
+  }
+}

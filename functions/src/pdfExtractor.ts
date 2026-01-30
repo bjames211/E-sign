@@ -4,6 +4,12 @@ const anthropic = new Anthropic({
   apiKey: process.env.ANTHROPIC_API_KEY,
 });
 
+// Expected deposit percentages by installer
+const DEPOSIT_PERCENTAGES: Record<string, number> = {
+  'Eagle Carports': 19,
+  'American Carports': 20,
+};
+
 export interface ExtractedPdfData {
   customerName: string | null;
   address: string | null;
@@ -15,6 +21,12 @@ export interface ExtractedPdfData {
   subtotal: number | null;
   downPayment: number | null;
   balanceDue: number | null;
+  // Deposit validation fields
+  expectedDepositPercent: number | null;
+  expectedDepositAmount: number | null;
+  actualDepositPercent: number | null;
+  depositDiscrepancy: boolean;
+  depositDiscrepancyAmount: number | null;
   rawResponse: string;
   extractedAt: Date;
 }
@@ -94,6 +106,35 @@ Return ONLY the JSON, no other text.`,
       parsed = {};
     }
 
+    const subtotal = parsed.subtotal ? Number(parsed.subtotal) : null;
+    const downPayment = parsed.downPayment ? Number(parsed.downPayment) : null;
+
+    // Calculate deposit validation
+    const expectedPercent = DEPOSIT_PERCENTAGES[installer] || null;
+    let expectedAmount: number | null = null;
+    let actualPercent: number | null = null;
+    let depositDiscrepancy = false;
+    let discrepancyAmount: number | null = null;
+
+    if (subtotal && expectedPercent) {
+      expectedAmount = Math.round((subtotal * expectedPercent / 100) * 100) / 100;
+
+      if (downPayment !== null) {
+        actualPercent = Math.round((downPayment / subtotal * 100) * 100) / 100;
+
+        // Flag if actual deposit differs from expected by more than $1
+        const difference = Math.abs(downPayment - expectedAmount);
+        if (difference > 1) {
+          depositDiscrepancy = true;
+          discrepancyAmount = Math.round((downPayment - expectedAmount) * 100) / 100;
+          console.log(`⚠️ DEPOSIT DISCREPANCY for ${installer}:`);
+          console.log(`   Expected: $${expectedAmount} (${expectedPercent}%)`);
+          console.log(`   Actual: $${downPayment} (${actualPercent}%)`);
+          console.log(`   Difference: $${discrepancyAmount}`);
+        }
+      }
+    }
+
     const extractedData: ExtractedPdfData = {
       customerName: parsed.customerName || null,
       address: parsed.address || null,
@@ -102,9 +143,14 @@ Return ONLY the JSON, no other text.`,
       zip: parsed.zip || null,
       email: parsed.email || null,
       phone: parsed.phone || null,
-      subtotal: parsed.subtotal ? Number(parsed.subtotal) : null,
-      downPayment: parsed.downPayment ? Number(parsed.downPayment) : null,
+      subtotal,
+      downPayment,
       balanceDue: parsed.balanceDue ? Number(parsed.balanceDue) : null,
+      expectedDepositPercent: expectedPercent,
+      expectedDepositAmount: expectedAmount,
+      actualDepositPercent: actualPercent,
+      depositDiscrepancy,
+      depositDiscrepancyAmount: discrepancyAmount,
       rawResponse,
       extractedAt: new Date(),
     };

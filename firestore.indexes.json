@@ -1,10 +1,19 @@
 {
   "indexes": [
     {
-      "collectionGroup": "esign_documents",
+      "collectionGroup": "change_orders",
       "queryScope": "COLLECTION",
       "fields": [
-        { "fieldPath": "signNowDocumentId", "order": "ASCENDING" }
+        { "fieldPath": "orderId", "order": "ASCENDING" },
+        { "fieldPath": "createdAt", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "payments",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "orderId", "order": "ASCENDING" },
+        { "fieldPath": "createdAt", "order": "DESCENDING" }
       ]
     }
   ],

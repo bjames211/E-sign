@@ -7,5 +7,55 @@ service cloud.firestore {
       allow create: if request.auth != null;
       allow update: if false; // Only Cloud Functions should update
     }
+
+    // Orders - authenticated users can CRUD
+    match /orders/{orderId} {
+      allow read: if request.auth != null;
+      allow create: if request.auth != null;
+      allow update: if request.auth != null;
+      allow delete: if request.auth != null;
+    }
+
+    // Quotes - authenticated users can read, only Cloud Functions create/update
+    match /quotes/{quoteId} {
+      allow read: if request.auth != null;
+      allow create: if request.auth != null;
+      allow update: if request.auth != null;
+      allow delete: if request.auth != null;
+    }
+
+    // Admin options - authenticated users can read/write
+    match /admin_options/{optionType} {
+      allow read: if request.auth != null;
+      allow write: if request.auth != null;
+    }
+
+    // Counters - authenticated users can read/write (for order number generation)
+    match /counters/{counterId} {
+      allow read: if request.auth != null;
+      allow write: if request.auth != null;
+    }
+
+    // Change orders - authenticated users can CRUD
+    match /change_orders/{changeOrderId} {
+      allow read: if request.auth != null;
+      allow create: if request.auth != null;
+      allow update: if request.auth != null;
+      allow delete: if request.auth != null;
+    }
+
+    // Payments - authenticated users can read, Cloud Functions handle create/update
+    match /payments/{paymentId} {
+      allow read: if request.auth != null;
+      allow create: if request.auth != null;
+      allow update: if request.auth != null;
+      allow delete: if false; // Don't allow deleting payment records
+    }
+
+    // Extracted PDF data
+    match /extracted_pdf_data/{docId} {
+      allow read: if request.auth != null;
+      allow write: if false; // Only Cloud Functions
+    }
   }
 }

@@ -30,7 +30,20 @@
       "Bash(open \"https://console.developers.google.com/apis/api/sheets.googleapis.com/overview?project=896222149181\")",
       "Bash(firebase login:*)",
       "Bash(open \"https://console.firebase.google.com\")",
-      "Bash(git check-ignore:*)"
+      "Bash(git check-ignore:*)",
+      "Bash(git restore:*)",
+      "Bash(open \"https://console.developers.google.com/apis/api/drive.googleapis.com/overview?project=896222149181\")",
+      "Bash(firebase hosting:channel:list:*)",
+      "Bash(open \"https://console.firebase.google.com/project/e-sign-27f9a/settings/general\")",
+      "WebFetch(domain:docs.google.com)",
+      "WebSearch",
+      "Bash(claude mcp add:*)",
+      "Bash(gh auth:*)",
+      "Bash(npm run dev:*)",
+      "Bash(grep:*)",
+      "Bash(find:*)",
+      "Bash(tree:*)",
+      "Bash(npx tsc:*)"
     ]
   }
 }
