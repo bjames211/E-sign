@@ -79,18 +79,19 @@ export function OrderCard({ order, onClick, onApprovePayment }: OrderCardProps) 
   const paymentTypeLabel = order.payment?.type?.replace(/_/g, ' ') || 'Unknown';
 
   // Calculate balance for display
-  // Include additionalDepositDue from change orders in total deposit required
-  const baseDeposit = order.pricing?.deposit || 0;
-  const additionalDeposit = order.additionalDepositDue || 0;
-  const refundDeposit = order.refundDue || 0;
-  const depositRequired = baseDeposit + additionalDeposit - refundDeposit;
+  // order.pricing.deposit is already updated when change orders are signed
+  const depositRequired = order.pricing?.deposit || 0;
 
   let balanceDue = 0;
   let totalPaid = 0;
 
-  // Start with payment summary if available
-  if (order.paymentSummary) {
+  // Get actual payment amount from payment summary
+  if (order.paymentSummary?.totalPaid) {
     totalPaid = order.paymentSummary.totalPaid;
+  } else if (paymentStatus === 'paid' || paymentStatus === 'manually_approved') {
+    // Fallback: if payment is marked as paid but no summary, use original deposit
+    // (this is what they paid before any change orders)
+    totalPaid = order.originalPricing?.deposit || order.pricing?.deposit || 0;
   }
 
   // Add test payment amount if in test mode
@@ -98,15 +99,9 @@ export function OrderCard({ order, onClick, onApprovePayment }: OrderCardProps) 
     totalPaid += order.testPaymentAmount;
   }
 
-  // Calculate balance
-  if (totalPaid > 0) {
-    balanceDue = depositRequired - totalPaid;
-  } else if (paymentStatus === 'paid' || paymentStatus === 'manually_approved') {
-    totalPaid = depositRequired;
-    balanceDue = 0;
-  } else {
-    balanceDue = depositRequired;
-  }
+  // Calculate balance: required minus paid
+  // Positive = still owed, Negative = overpaid/refund due
+  balanceDue = depositRequired - totalPaid;
 
   const hasBalance = balanceDue !== 0;
 
