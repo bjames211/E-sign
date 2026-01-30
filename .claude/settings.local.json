@@ -43,7 +43,8 @@
       "Bash(grep:*)",
       "Bash(find:*)",
       "Bash(tree:*)",
-      "Bash(npx tsc:*)"
+      "Bash(npx tsc:*)",
+      "Bash(npx firebase deploy:*)"
     ]
   }
 }

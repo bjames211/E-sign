@@ -81,17 +81,33 @@ export function OrderCard({ order, onClick, onApprovePayment }: OrderCardProps) 
   // Calculate balance for display
   // order.pricing.deposit is already updated when change orders are signed
   const depositRequired = order.pricing?.deposit || 0;
+  const originalDeposit = order.originalPricing?.deposit || depositRequired;
 
   let balanceDue = 0;
   let totalPaid = 0;
 
-  // Get actual payment amount from payment summary
-  if (order.paymentSummary?.totalPaid) {
-    totalPaid = order.paymentSummary.totalPaid;
-  } else if (paymentStatus === 'paid' || paymentStatus === 'manually_approved') {
-    // Fallback: if payment is marked as paid but no summary, use original deposit
-    // (this is what they paid before any change orders)
-    totalPaid = order.originalPricing?.deposit || order.pricing?.deposit || 0;
+  // Check if customer has paid their initial deposit
+  const hasPaidInitialDeposit = paymentStatus === 'paid' || paymentStatus === 'manually_approved';
+
+  // Get payment summary total (may only have adjustments/refunds, not original payment)
+  const summaryTotal = order.paymentSummary?.totalPaid ?? 0;
+
+  if (hasPaidInitialDeposit) {
+    // Customer paid their deposit
+    if (summaryTotal <= 0) {
+      // Summary only has refunds (original Stripe payment not in payments collection)
+      // Net paid = original deposit + refunds (refunds are negative)
+      totalPaid = originalDeposit + summaryTotal;
+    } else if (summaryTotal < originalDeposit) {
+      // Summary has some payments but less than original - likely adjustments only
+      totalPaid = originalDeposit + summaryTotal;
+    } else {
+      // Summary includes the full payment history
+      totalPaid = summaryTotal;
+    }
+  } else {
+    // Not marked as paid - just use summary
+    totalPaid = summaryTotal;
   }
 
   // Add test payment amount if in test mode
