@@ -15,6 +15,98 @@
         background: #f5f5f5;
         min-height: 100vh;
       }
+
+      /* ===== Mobile Responsive ===== */
+
+      /* Header: stack on mobile */
+      @media (max-width: 768px) {
+        .app-header {
+          flex-wrap: wrap !important;
+          height: auto !important;
+          padding: 10px 16px !important;
+          gap: 8px;
+        }
+        .app-header-left {
+          width: 100%;
+          justify-content: space-between !important;
+        }
+        .app-nav {
+          overflow-x: auto;
+          -webkit-overflow-scrolling: touch;
+          scrollbar-width: none;
+          width: 100%;
+        }
+        .app-nav::-webkit-scrollbar { display: none; }
+        .app-nav button {
+          white-space: nowrap;
+          font-size: 12px !important;
+          padding: 6px 10px !important;
+        }
+        .app-header-right {
+          width: 100%;
+          justify-content: flex-end !important;
+          flex-wrap: wrap;
+          gap: 8px !important;
+        }
+      }
+
+      /* Stats grids: responsive columns */
+      @media (max-width: 1024px) {
+        .stats-grid {
+          grid-template-columns: repeat(3, 1fr) !important;
+        }
+      }
+      @media (max-width: 600px) {
+        .stats-grid {
+          grid-template-columns: repeat(2, 1fr) !important;
+        }
+      }
+
+      /* Form grids: single column on mobile */
+      @media (max-width: 600px) {
+        .form-grid {
+          grid-template-columns: 1fr !important;
+        }
+      }
+
+      /* Tables: horizontal scroll on mobile */
+      .table-responsive {
+        overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
+      }
+      .table-responsive table {
+        min-width: 700px;
+      }
+
+      /* Filter rows: wrap on mobile */
+      @media (max-width: 768px) {
+        .filter-row {
+          flex-direction: column !important;
+          align-items: stretch !important;
+        }
+        .filter-row select, .filter-row input {
+          width: 100% !important;
+          min-width: 0 !important;
+        }
+      }
+
+      /* Date presets: wrap */
+      @media (max-width: 600px) {
+        .date-presets {
+          flex-wrap: wrap !important;
+        }
+        .date-presets button {
+          font-size: 11px !important;
+          padding: 4px 10px !important;
+        }
+      }
+
+      /* Container padding on mobile */
+      @media (max-width: 600px) {
+        .page-container {
+          padding: 12px !important;
+        }
+      }
     </style>
   </head>
   <body>

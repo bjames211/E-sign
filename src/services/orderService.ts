@@ -10,8 +10,12 @@ import {
   orderBy,
   where,
   serverTimestamp,
-  setDoc,
   Timestamp,
+  limit as firestoreLimit,
+  startAfter,
+  QueryDocumentSnapshot,
+  DocumentData,
+  getCountFromServer,
 } from 'firebase/firestore';
 import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
 import { db, storage } from '../config/firebase';
@@ -26,22 +30,120 @@ import {
   requiresManualPaymentApproval,
 } from '../types/order';
 
+import { auth } from '../config/firebase';
+
 const ORDERS_COLLECTION = 'orders';
 const QUOTES_COLLECTION = 'quotes';
 const COUNTERS_COLLECTION = 'counters';
+const AUDIT_LOG_COLLECTION = 'order_audit_log';
 
-// Generate sequential order number
+// --- Order Audit Trail ---
+interface AuditFieldChange {
+  field: string;
+  oldValue: unknown;
+  newValue: unknown;
+}
+
+interface OrderAuditEntry {
+  orderId: string;
+  orderNumber: string;
+  action: 'created' | 'updated' | 'status_changed' | 'deleted' | 'sent_for_signature' | 'signed';
+  changes: AuditFieldChange[];
+  userId: string;
+  userEmail: string;
+  timestamp: ReturnType<typeof serverTimestamp>;
+}
+
+async function logOrderAudit(
+  orderId: string,
+  orderNumber: string,
+  action: OrderAuditEntry['action'],
+  changes: AuditFieldChange[] = [],
+) {
+  try {
+    const user = auth.currentUser;
+    const entry: OrderAuditEntry = {
+      orderId,
+      orderNumber,
+      action,
+      changes,
+      userId: user?.uid || 'unknown',
+      userEmail: user?.email || 'unknown',
+      timestamp: serverTimestamp(),
+    };
+    await addDoc(collection(db, AUDIT_LOG_COLLECTION), entry);
+  } catch (err) {
+    console.error('Failed to log order audit:', err);
+  }
+}
+
+function diffFields(oldData: Record<string, unknown>, newData: Record<string, unknown>): AuditFieldChange[] {
+  const changes: AuditFieldChange[] = [];
+  for (const key of Object.keys(newData)) {
+    if (key === 'updatedAt') continue;
+    const oldVal = oldData[key];
+    const newVal = newData[key];
+    if (JSON.stringify(oldVal) !== JSON.stringify(newVal)) {
+      changes.push({ field: key, oldValue: oldVal, newValue: newVal });
+    }
+  }
+  return changes;
+}
+
+// Fetch audit history for an order
+export async function getOrderAuditLog(orderId: string): Promise<(OrderAuditEntry & { id: string })[]> {
+  const q = query(
+    collection(db, AUDIT_LOG_COLLECTION),
+    where('orderId', '==', orderId),
+    orderBy('timestamp', 'desc')
+  );
+  const snap = await getDocs(q);
+  return snap.docs.map(d => ({ id: d.id, ...d.data() } as OrderAuditEntry & { id: string }));
+}
+
+// Generate sequential order number with uniqueness check
 async function generateOrderNumber(): Promise<string> {
-  const counterRef = doc(db, COUNTERS_COLLECTION, 'orders_form');
-  const counterSnap = await getDoc(counterRef);
+  const counterRef = doc(db, COUNTERS_COLLECTION, 'order_number');
 
-  let nextNumber = 1;
-  if (counterSnap.exists()) {
-    nextNumber = (counterSnap.data().current || 0) + 1;
+  // Use a transaction to ensure atomic increment
+  const { runTransaction, query, where, getDocs, limit } = await import('firebase/firestore');
+
+  let orderNumber = '';
+  let attempts = 0;
+  const maxAttempts = 10;
+
+  while (attempts < maxAttempts) {
+    attempts++;
+
+    // Get next number atomically
+    const nextNumber = await runTransaction(db, async (transaction) => {
+      const counterSnap = await transaction.get(counterRef);
+      let current = 0;
+      if (counterSnap.exists()) {
+        current = counterSnap.data().current || 0;
+      }
+      const next = current + 1;
+      transaction.set(counterRef, { current: next });
+      return next;
+    });
+
+    orderNumber = `ORD-${String(nextNumber).padStart(5, '0')}`;
+
+    // Verify uniqueness - check if order number already exists
+    const ordersRef = collection(db, 'orders');
+    const existingQuery = query(ordersRef, where('orderNumber', '==', orderNumber), limit(1));
+    const existingSnap = await getDocs(existingQuery);
+
+    if (existingSnap.empty) {
+      // Order number is unique, we can use it
+      return orderNumber;
+    }
+
+    // If duplicate found, loop will try again with next number
+    console.warn(`Order number ${orderNumber} already exists, trying next...`);
   }
 
-  await setDoc(counterRef, { current: nextNumber });
-  return `ORD-${String(nextNumber).padStart(5, '0')}`;
+  throw new Error(`Failed to generate unique order number after ${maxAttempts} attempts`);
 }
 
 // Upload a single file to Firebase Storage
@@ -128,8 +230,15 @@ async function uploadOrderFiles(
 
 // Determine initial payment status based on payment type
 function getInitialPaymentStatus(paymentType: string, stripePaymentId?: string, isTestMode?: boolean): PaymentStatus {
-  // Test mode - mark as paid immediately
-  if (isTestMode) {
+  // Manual payment types (check, wire, credit_on_file, other) - ALWAYS pending until manager approves
+  // This applies even in test mode - manual payments need approval
+  const manualPaymentTypes = ['check', 'wire', 'credit_on_file', 'other'];
+  if (manualPaymentTypes.includes(paymentType)) {
+    return 'pending';
+  }
+
+  // Test mode for Stripe payments - mark as paid immediately
+  if (isTestMode && paymentType.startsWith('stripe_')) {
     return 'paid';
   }
   // Stripe already paid - mark as paid (will be verified)
@@ -140,7 +249,7 @@ function getInitialPaymentStatus(paymentType: string, stripePaymentId?: string, 
   if (paymentType.startsWith('stripe_')) {
     return 'pending';
   }
-  // Manual payment types - pending until manually approved
+  // Default to pending
   return 'pending';
 }
 
@@ -209,6 +318,9 @@ export async function createOrder(
 
   const docRef = await addDoc(collection(db, ORDERS_COLLECTION), order);
 
+  // Audit: log creation
+  await logOrderAudit(docRef.id, orderNumber, 'created');
+
   return {
     ...order,
     id: docRef.id,
@@ -264,6 +376,16 @@ export async function updateOrder(
     updates.specialNotes = formData.specialNotes;
   }
 
+  // Audit: read current and diff
+  const currentSnap = await getDoc(docRef);
+  if (currentSnap.exists()) {
+    const currentData = currentSnap.data();
+    const changes = diffFields(currentData as Record<string, unknown>, updates);
+    if (changes.length > 0) {
+      await logOrderAudit(orderId, currentData.orderNumber || '', 'updated', changes);
+    }
+  }
+
   await updateDoc(docRef, updates);
 }
 
@@ -274,11 +396,24 @@ export async function updateOrderStatus(
   additionalData?: Record<string, unknown>
 ): Promise<void> {
   const docRef = doc(db, ORDERS_COLLECTION, orderId);
+
+  // Audit: log status change
+  const currentSnap = await getDoc(docRef);
+  const currentData = currentSnap.exists() ? currentSnap.data() : null;
+  const oldStatus = currentData?.status || 'unknown';
+
   await updateDoc(docRef, {
     status,
     updatedAt: serverTimestamp(),
     ...additionalData,
   });
+
+  await logOrderAudit(
+    orderId,
+    currentData?.orderNumber || '',
+    'status_changed',
+    [{ field: 'status', oldValue: oldStatus, newValue: status }],
+  );
 }
 
 // Get a single order
@@ -308,6 +443,44 @@ export async function getOrders(): Promise<Order[]> {
     id: doc.id,
     ...doc.data(),
   })) as Order[];
+}
+
+// Paginated orders
+export interface PaginatedOrdersResult {
+  orders: Order[];
+  lastDoc: QueryDocumentSnapshot<DocumentData> | null;
+  hasMore: boolean;
+  totalCount: number;
+}
+
+export async function getOrdersPaginated(
+  pageSize: number = 50,
+  afterDoc?: QueryDocumentSnapshot<DocumentData> | null,
+): Promise<PaginatedOrdersResult> {
+  // Get total count
+  const countQuery = query(collection(db, ORDERS_COLLECTION));
+  const countSnap = await getCountFromServer(countQuery);
+  const totalCount = countSnap.data().count;
+
+  // Build paginated query
+  const q = afterDoc
+    ? query(collection(db, ORDERS_COLLECTION), orderBy('createdAt', 'desc'), startAfter(afterDoc), firestoreLimit(pageSize + 1))
+    : query(collection(db, ORDERS_COLLECTION), orderBy('createdAt', 'desc'), firestoreLimit(pageSize + 1));
+  const querySnapshot = await getDocs(q);
+
+  const docs = querySnapshot.docs;
+  const hasMore = docs.length > pageSize;
+  const resultDocs = hasMore ? docs.slice(0, pageSize) : docs;
+
+  return {
+    orders: resultDocs.map((doc) => ({
+      id: doc.id,
+      ...doc.data(),
+    })) as Order[],
+    lastDoc: resultDocs.length > 0 ? resultDocs[resultDocs.length - 1] : null,
+    hasMore,
+    totalCount,
+  };
 }
 
 // Get orders by status

@@ -1,17 +1,19 @@
 import React from 'react';
-import { PaymentSummary, formatCurrency } from '../../types/payment';
+import { PaymentSummary, OrderLedgerSummary, formatCurrency } from '../../types/payment';
 
 interface PaymentSummaryCardProps {
   depositRequired: number;
   summary: PaymentSummary | null;
+  ledgerSummary?: OrderLedgerSummary | null;  // New: use ledger summary if available
   loading?: boolean;
-  additionalDepositDue?: number;  // From change orders
-  refundDue?: number;             // From change orders
+  additionalDepositDue?: number;  // From change orders (legacy)
+  refundDue?: number;             // From change orders (legacy)
 }
 
 export function PaymentSummaryCard({
   depositRequired,
   summary,
+  ledgerSummary,
   loading,
   additionalDepositDue,
   refundDue,
@@ -25,15 +27,36 @@ export function PaymentSummaryCard({
     );
   }
 
-  const totalPaid = summary?.totalPaid || 0;
-  const totalPending = summary?.totalPending || 0;
+  // Use ledger summary if available (new single source of truth)
+  let totalPaid = 0;
+  let totalPending = 0;
+  let totalDepositRequired = 0;
+  let balance = 0;
+  let isOverpaid = false;
+  let originalDeposit = depositRequired;
+  let depositAdjustments = 0;
 
-  // Total deposit required includes any additional deposit from change orders
-  const totalDepositRequired = depositRequired + (additionalDepositDue || 0) - (refundDue || 0);
+  if (ledgerSummary) {
+    // Use ledger summary - single source of truth
+    totalPaid = ledgerSummary.netReceived;
+    totalPending = ledgerSummary.pendingReceived;
+    totalDepositRequired = ledgerSummary.depositRequired;
+    balance = ledgerSummary.balance;
+    isOverpaid = balance < 0;
+    originalDeposit = ledgerSummary.originalDeposit;
+    depositAdjustments = ledgerSummary.depositAdjustments;
+  } else {
+    // Legacy calculation
+    totalPaid = summary?.totalPaid || 0;
+    totalPending = summary?.totalPending || 0;
 
-  // Balance calculation uses total deposit required
-  const balance = totalDepositRequired - totalPaid;
-  const isOverpaid = balance < 0;
+    // Total deposit required includes any additional deposit from change orders
+    totalDepositRequired = depositRequired + (additionalDepositDue || 0) - (refundDue || 0);
+
+    // Balance calculation uses total deposit required
+    balance = totalDepositRequired - totalPaid;
+    isOverpaid = balance < 0;
+  }
 
   return (
     <div style={styles.card}>
@@ -43,13 +66,22 @@ export function PaymentSummaryCard({
           <span style={styles.label}>Deposit Required:</span>
           <span style={styles.value}>{formatCurrency(totalDepositRequired)}</span>
         </div>
-        {/* Show breakdown if there's additional deposit or refund adjustments */}
-        {(additionalDepositDue && additionalDepositDue > 0) && (
+        {/* Show breakdown if there's deposit adjustments (from ledger or legacy) */}
+        {ledgerSummary && depositAdjustments !== 0 && (
+          <div style={styles.subRow}>
+            <span style={styles.subLabel}>
+              (Original: {formatCurrency(originalDeposit)}
+              {depositAdjustments > 0 ? ' + ' : ' - '}
+              CO: {formatCurrency(Math.abs(depositAdjustments))})
+            </span>
+          </div>
+        )}
+        {!ledgerSummary && (additionalDepositDue && additionalDepositDue > 0) && (
           <div style={styles.subRow}>
             <span style={styles.subLabel}>(Original: {formatCurrency(depositRequired)} + CO: {formatCurrency(additionalDepositDue)})</span>
           </div>
         )}
-        {(refundDue && refundDue > 0) && (
+        {!ledgerSummary && (refundDue && refundDue > 0) && (
           <div style={styles.subRow}>
             <span style={styles.subLabel}>(Original: {formatCurrency(depositRequired)} - CO Refund: {formatCurrency(refundDue)})</span>
           </div>

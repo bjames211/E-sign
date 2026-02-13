@@ -1,10 +1,13 @@
 import React, { useState } from 'react';
 import { DropdownManager } from './DropdownManager';
+import { UserManagement } from './UserManagement';
 import { seedAdminOptions } from '../../services/adminService';
 import { AdminOptionType, ALL_ADMIN_OPTION_TYPES, ADMIN_OPTION_LABELS } from '../../types/admin';
 
+type AdminTab = AdminOptionType | 'users';
+
 export function AdminPanel() {
-  const [activeTab, setActiveTab] = useState<AdminOptionType>('manufacturers');
+  const [activeTab, setActiveTab] = useState<AdminTab>('users');
   const [seeding, setSeeding] = useState(false);
   const [seedMessage, setSeedMessage] = useState<string | null>(null);
 
@@ -45,6 +48,17 @@ export function AdminPanel() {
       <div style={styles.content}>
         {/* Tabs */}
         <div style={styles.tabs}>
+          {/* Users tab at top */}
+          <button
+            onClick={() => setActiveTab('users')}
+            style={{
+              ...styles.tab,
+              ...(activeTab === 'users' ? styles.activeTab : {}),
+            }}
+          >
+            Users & Roles
+          </button>
+          <div style={styles.tabDivider} />
           {ALL_ADMIN_OPTION_TYPES.map((type) => (
             <button
               key={type}
@@ -61,7 +75,11 @@ export function AdminPanel() {
 
         {/* Active panel */}
         <div style={styles.panel}>
-          <DropdownManager key={activeTab} optionType={activeTab} />
+          {activeTab === 'users' ? (
+            <UserManagement />
+          ) : (
+            <DropdownManager key={activeTab} optionType={activeTab} />
+          )}
         </div>
       </div>
     </div>
@@ -135,6 +153,11 @@ const styles: Record<string, React.CSSProperties> = {
     borderLeftColor: '#2196F3',
     fontWeight: 600,
     color: '#2196F3',
+  },
+  tabDivider: {
+    height: '1px',
+    backgroundColor: '#e0e0e0',
+    margin: '8px 16px',
   },
   panel: {
     flex: 1,

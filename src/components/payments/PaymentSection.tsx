@@ -6,14 +6,18 @@ import {
   PaymentMethod,
   AddPaymentFormData,
   calculatePaymentSummary,
+  PaymentLedgerEntry,
+  OrderLedgerSummary,
 } from '../../types/payment';
 import {
   getPaymentsForOrder,
+  getLedgerEntriesForOrder,
 } from '../../services/paymentService';
 import { PaymentSummaryCard } from './PaymentSummaryCard';
 import { PaymentHistoryTable } from './PaymentHistoryTable';
 import { AddPaymentModal } from './AddPaymentModal';
 import { ApprovePaymentModal } from './ApprovePaymentModal';
+import { PaymentReconciliation } from './PaymentReconciliation';
 
 interface PaymentSectionProps {
   order: Order;
@@ -22,14 +26,20 @@ interface PaymentSectionProps {
 
 export function PaymentSection({ order, onRefresh }: PaymentSectionProps) {
   const [payments, setPayments] = useState<PaymentRecord[]>([]);
+  const [_ledgerEntries, setLedgerEntries] = useState<PaymentLedgerEntry[]>([]);
   const [summary, setSummary] = useState<PaymentSummary | null>(null);
+  const [ledgerSummary, setLedgerSummary] = useState<OrderLedgerSummary | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [showAddModal, setShowAddModal] = useState(false);
   const [_approving, setApproving] = useState<string | null>(null);
   const [paymentToApprove, setPaymentToApprove] = useState<PaymentRecord | null>(null);
 
-  const depositRequired = order.pricing?.deposit || 0;
+  // Check if order uses ledger system
+  const useLedgerSystem = !!order.ledgerSummary;
+  const depositRequired = useLedgerSystem
+    ? (order.ledgerSummary?.depositRequired || 0)
+    : (order.pricing?.deposit || 0);
 
   useEffect(() => {
     if (order.id) {
@@ -44,67 +54,112 @@ export function PaymentSection({ order, onRefresh }: PaymentSectionProps) {
     setError(null);
 
     try {
-      const paymentRecords = await getPaymentsForOrder(order.id);
-      setPayments(paymentRecords);
+      // If order has ledger summary, use ledger entries
+      if (useLedgerSystem) {
+        const entries = await getLedgerEntriesForOrder(order.id);
+        setLedgerEntries(entries);
+        setLedgerSummary(order.ledgerSummary || null);
 
-      // Calculate summary from payment records
-      let computedSummary = calculatePaymentSummary(paymentRecords, depositRequired);
+        // Also convert to PaymentSummary format for compatibility
+        setSummary({
+          totalPaid: order.ledgerSummary?.netReceived || 0,
+          totalPending: order.ledgerSummary?.pendingReceived || 0,
+          balance: order.ledgerSummary?.balance || 0,
+          paymentCount: order.ledgerSummary?.entryCount || 0,
+        });
 
-      // Check if we need to include legacy payment from order.payment
-      // This handles orders where the initial payment is stored in order.payment but not in the payments collection
-      const hasLegacyPayment = order.payment?.status === 'paid' || order.payment?.status === 'manually_approved';
-      const legacyPaymentAmount = order.pricing?.deposit || 0;
+        // Load legacy payments for display purposes (for hybrid view)
+        const paymentRecords = await getPaymentsForOrder(order.id);
+        setPayments(paymentRecords);
+      } else {
+        // Legacy mode - use payments collection
+        const paymentRecords = await getPaymentsForOrder(order.id);
+        setPayments(paymentRecords);
 
-      // Check if the legacy payment is already in the payments collection
-      // by looking for a payment with the same stripe ID or an initial_deposit category
-      const hasLegacyPaymentRecord = paymentRecords.some(p =>
-        (p.stripePaymentId && p.stripePaymentId === order.payment?.stripePaymentId) ||
-        (p.category === 'initial_deposit' && p.status !== 'pending')
-      );
+        // Calculate summary from payment records
+        let computedSummary = calculatePaymentSummary(paymentRecords, depositRequired);
 
-      // If there's a legacy payment that's not in the payments collection, add it to totals
-      if (hasLegacyPayment && !hasLegacyPaymentRecord && legacyPaymentAmount > 0) {
-        computedSummary = {
-          ...computedSummary,
-          totalPaid: computedSummary.totalPaid + legacyPaymentAmount,
-          balance: depositRequired - (computedSummary.totalPaid + legacyPaymentAmount),
-          paymentCount: computedSummary.paymentCount + 1,
-        };
+        // Check if we need to include legacy payment from order.payment
+        const hasConfirmedLegacyPayment = order.payment?.status === 'paid' || order.payment?.status === 'manually_approved';
+        const hasPendingLegacyPayment = order.payment?.status === 'pending';
+        // Use testPaymentAmount if in test mode, otherwise use deposit amount
+        const legacyPaymentAmount = (order.isTestMode && order.testPaymentAmount !== undefined)
+          ? order.testPaymentAmount
+          : (order.pricing?.deposit || 0);
+
+        // Check if the legacy payment is already in the payments collection
+        const hasLegacyPaymentRecord = paymentRecords.some(p =>
+          (p.stripePaymentId && p.stripePaymentId === order.payment?.stripePaymentId) ||
+          (p.category === 'initial_deposit')
+        );
+
+        // If there's a confirmed legacy payment that's not in the payments collection, add it to totals
+        if (hasConfirmedLegacyPayment && !hasLegacyPaymentRecord && legacyPaymentAmount > 0) {
+          computedSummary = {
+            ...computedSummary,
+            totalPaid: computedSummary.totalPaid + legacyPaymentAmount,
+            balance: depositRequired - (computedSummary.totalPaid + legacyPaymentAmount),
+            paymentCount: computedSummary.paymentCount + 1,
+          };
+        }
+
+        // If there's a pending legacy payment, add it to pending totals (not paid)
+        if (hasPendingLegacyPayment && !hasLegacyPaymentRecord && legacyPaymentAmount > 0) {
+          computedSummary = {
+            ...computedSummary,
+            totalPending: (computedSummary.totalPending || 0) + legacyPaymentAmount,
+            paymentCount: computedSummary.paymentCount + 1,
+          };
+        }
+
+        // If test mode with initial test payment, add it to the totals
+        if (order.isTestMode && order.testPaymentAmount !== undefined && order.testPaymentAmount > 0 && !hasConfirmedLegacyPayment && !hasPendingLegacyPayment) {
+          computedSummary = {
+            ...computedSummary,
+            totalPaid: computedSummary.totalPaid + order.testPaymentAmount,
+            balance: depositRequired - (computedSummary.totalPaid + order.testPaymentAmount),
+            paymentCount: computedSummary.paymentCount + 1,
+          };
+        }
+
+        setSummary(computedSummary);
       }
-
-      // If test mode with initial test payment, add it to the totals (if not already counted)
-      if (order.isTestMode && order.testPaymentAmount !== undefined && order.testPaymentAmount > 0 && !hasLegacyPayment) {
-        computedSummary = {
-          ...computedSummary,
-          totalPaid: computedSummary.totalPaid + order.testPaymentAmount,
-          balance: depositRequired - (computedSummary.totalPaid + order.testPaymentAmount),
-          paymentCount: computedSummary.paymentCount + 1,
-        };
-      }
-
-      setSummary(computedSummary);
     } catch (err: any) {
       console.error('Failed to load payments:', err);
       setError(err.message || 'Failed to load payments');
 
-      // If legacy payment exists, use it
-      const hasLegacyPayment = order.payment?.status === 'paid' || order.payment?.status === 'manually_approved';
-      const legacyPaymentAmount = order.pricing?.deposit || 0;
+      // Fallback: use order data if available
+      if (useLedgerSystem && order.ledgerSummary) {
+        setLedgerSummary(order.ledgerSummary);
+        setSummary({
+          totalPaid: order.ledgerSummary.netReceived,
+          totalPending: order.ledgerSummary.pendingReceived,
+          balance: order.ledgerSummary.balance,
+          paymentCount: order.ledgerSummary.entryCount,
+        });
+      } else {
+        // Legacy fallback
+        const hasLegacyPayment = order.payment?.status === 'paid' || order.payment?.status === 'manually_approved';
+        // Use testPaymentAmount if in test mode, otherwise use deposit amount
+        const legacyPaymentAmount = (order.isTestMode && order.testPaymentAmount !== undefined)
+          ? order.testPaymentAmount
+          : (order.pricing?.deposit || 0);
 
-      if (hasLegacyPayment && legacyPaymentAmount > 0) {
-        setSummary({
-          totalPaid: legacyPaymentAmount,
-          totalPending: 0,
-          balance: depositRequired - legacyPaymentAmount,
-          paymentCount: 1,
-        });
-      } else if (order.isTestMode && order.testPaymentAmount !== undefined) {
-        setSummary({
-          totalPaid: order.testPaymentAmount,
-          totalPending: 0,
-          balance: depositRequired - order.testPaymentAmount,
-          paymentCount: 1,
-        });
+        if (hasLegacyPayment && legacyPaymentAmount > 0) {
+          setSummary({
+            totalPaid: legacyPaymentAmount,
+            totalPending: 0,
+            balance: depositRequired - legacyPaymentAmount,
+            paymentCount: 1,
+          });
+        } else if (order.isTestMode && order.testPaymentAmount !== undefined) {
+          setSummary({
+            totalPaid: order.testPaymentAmount,
+            totalPending: 0,
+            balance: depositRequired - order.testPaymentAmount,
+            paymentCount: 1,
+          });
+        }
       }
     } finally {
       setLoading(false);
@@ -121,13 +176,34 @@ export function PaymentSection({ order, onRefresh }: PaymentSectionProps) {
 
     const amount = parseFloat(formData.amount);
 
-    // Call cloud function to add payment
-    const response = await fetch(
-      `${import.meta.env.VITE_FUNCTIONS_URL || ''}/addPaymentRecord`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+    // Use ledger endpoint for ledger-based orders, otherwise use legacy payment record
+    const endpoint = useLedgerSystem ? 'addLedgerEntry' : 'addPaymentRecord';
+
+    // Determine transaction type for ledger
+    const transactionType = formData.category === 'refund' ? 'refund' : 'payment';
+
+    // For ledger entries, manual payments without approval code should be 'pending'
+    // The backend will handle this, but we don't pass a status to let it default to 'pending'
+
+    const requestBody = useLedgerSystem
+      ? {
+          // Ledger entry format
+          orderId: order.id,
+          orderNumber: order.orderNumber,
+          transactionType,
+          amount,
+          method: formData.method,
+          category: formData.category,
+          stripePaymentId: formData.stripePaymentId || undefined,
+          description: formData.description || `${formData.method} payment`,
+          notes: formData.notes || undefined,
+          proofFile: proofFile || undefined,
+          approvalCode: formData.approvalCode || undefined,
+          createdBy: order.createdBy || 'unknown',
+          // Don't pass status - let backend determine based on method and approval code
+        }
+      : {
+          // Legacy payment record format
           orderId: order.id,
           orderNumber: order.orderNumber,
           amount,
@@ -139,7 +215,14 @@ export function PaymentSection({ order, onRefresh }: PaymentSectionProps) {
           proofFile: proofFile || undefined,
           approvalCode: formData.approvalCode || undefined,
           createdBy: order.createdBy || 'unknown',
-        }),
+        };
+
+    const response = await fetch(
+      `${import.meta.env.VITE_FUNCTIONS_URL || ''}/${endpoint}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(requestBody),
       }
     );
 
@@ -159,6 +242,29 @@ export function PaymentSection({ order, onRefresh }: PaymentSectionProps) {
 
   // Show approve modal for a payment
   const handleApprovePayment = (paymentId: string) => {
+    // Check for legacy pending payment
+    if (paymentId === 'legacy-initial-payment-pending') {
+      // Use testPaymentAmount if in test mode, otherwise use deposit amount
+      const legacyPaymentAmount = (order.isTestMode && order.testPaymentAmount !== undefined)
+        ? order.testPaymentAmount
+        : (order.pricing?.deposit || 0);
+      const legacyPaymentRecord: PaymentRecord = {
+        id: 'legacy-initial-payment-pending',
+        orderId: order.id || '',
+        orderNumber: order.orderNumber,
+        amount: legacyPaymentAmount,
+        method: order.payment?.type?.includes('stripe') ? 'stripe' : (order.payment?.type as any) || 'other',
+        category: 'initial_deposit',
+        status: 'pending',
+        description: `Initial deposit (${order.payment?.type?.replace(/_/g, ' ') || 'pending'})`,
+        createdAt: order.createdAt,
+        updatedAt: order.createdAt,
+        createdBy: order.createdBy || 'system',
+      };
+      setPaymentToApprove(legacyPaymentRecord);
+      return;
+    }
+
     const payment = payments.find(p => p.id === paymentId);
     if (payment) {
       setPaymentToApprove(payment);
@@ -177,6 +283,41 @@ export function PaymentSection({ order, onRefresh }: PaymentSectionProps) {
     setError(null);
 
     try {
+      // Handle legacy pending payment approval
+      if (paymentId === 'legacy-initial-payment-pending') {
+        // Call endpoint to approve the order's legacy payment and create ledger entry
+        const response = await fetch(
+          `${import.meta.env.VITE_FUNCTIONS_URL || ''}/approveLegacyPayment`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              orderId: order.id,
+              orderNumber: order.orderNumber,
+              approvalCode,
+              approvedBy: 'Manager',
+              method: method || order.payment?.type,
+              amount: order.pricing?.deposit || 0,
+              proofFile,
+            }),
+          }
+        );
+
+        const data = await response.json();
+
+        if (!data.success) {
+          throw new Error(data.error || 'Failed to approve payment');
+        }
+
+        await loadPayments();
+
+        if (onRefresh) {
+          onRefresh();
+        }
+        return;
+      }
+
+      // Regular payment approval
       const response = await fetch(
         `${import.meta.env.VITE_FUNCTIONS_URL || ''}/approvePaymentRecord`,
         {
@@ -259,6 +400,45 @@ export function PaymentSection({ order, onRefresh }: PaymentSectionProps) {
 
   const currentBalance = summary?.balance ?? depositRequired;
 
+  // Use new PaymentReconciliation view for ledger-based orders
+  if (useLedgerSystem && order.ledgerSummary) {
+    return (
+      <div style={styles.container}>
+        {error && <div style={styles.error}>{error}</div>}
+
+        <PaymentReconciliation
+          order={order}
+          ledgerSummary={order.ledgerSummary}
+          onAddPayment={() => setShowAddModal(true)}
+          onRefresh={onRefresh}
+        />
+
+        {/* Add Payment Modal */}
+        {showAddModal && order.id && (
+          <AddPaymentModal
+            orderId={order.id}
+            orderNumber={order.orderNumber}
+            depositRequired={depositRequired}
+            currentBalance={currentBalance}
+            onSubmit={handleAddPayment}
+            onClose={() => setShowAddModal(false)}
+          />
+        )}
+
+        {/* Approve Payment Modal */}
+        {paymentToApprove && (
+          <ApprovePaymentModal
+            payment={paymentToApprove}
+            orderNumber={order.orderNumber}
+            onApprove={handleConfirmApprove}
+            onClose={() => setPaymentToApprove(null)}
+          />
+        )}
+      </div>
+    );
+  }
+
+  // Legacy view for non-ledger orders
   return (
     <div style={styles.container}>
       {error && <div style={styles.error}>{error}</div>}
@@ -267,6 +447,7 @@ export function PaymentSection({ order, onRefresh }: PaymentSectionProps) {
       <PaymentSummaryCard
         depositRequired={depositRequired}
         summary={summary}
+        ledgerSummary={useLedgerSystem ? ledgerSummary : undefined}
         loading={loading}
         additionalDepositDue={order.additionalDepositDue}
         refundDue={order.refundDue}
@@ -287,17 +468,21 @@ export function PaymentSection({ order, onRefresh }: PaymentSectionProps) {
       <PaymentHistoryTable
         payments={(() => {
           // Check for legacy payment that's not in payments collection
-          const hasLegacyPayment = order.payment?.status === 'paid' || order.payment?.status === 'manually_approved';
-          const legacyPaymentAmount = order.pricing?.deposit || 0;
+          const hasConfirmedLegacyPayment = order.payment?.status === 'paid' || order.payment?.status === 'manually_approved';
+          const hasPendingLegacyPayment = order.payment?.status === 'pending';
+          // Use testPaymentAmount if in test mode, otherwise use deposit amount
+        const legacyPaymentAmount = (order.isTestMode && order.testPaymentAmount !== undefined)
+          ? order.testPaymentAmount
+          : (order.pricing?.deposit || 0);
           const hasLegacyPaymentRecord = payments.some(p =>
             (p.stripePaymentId && p.stripePaymentId === order.payment?.stripePaymentId) ||
-            (p.category === 'initial_deposit' && p.status !== 'pending')
+            (p.category === 'initial_deposit')
           );
 
           let displayPayments = [...payments];
 
-          // Add legacy payment as first row if it exists and isn't in the payments collection
-          if (hasLegacyPayment && !hasLegacyPaymentRecord && legacyPaymentAmount > 0) {
+          // Add confirmed legacy payment as first row if it exists and isn't in the payments collection
+          if (hasConfirmedLegacyPayment && !hasLegacyPaymentRecord && legacyPaymentAmount > 0) {
             const legacyPaymentRecord: PaymentRecord = {
               id: 'legacy-initial-payment',
               orderId: order.id || '',
@@ -314,8 +499,25 @@ export function PaymentSection({ order, onRefresh }: PaymentSectionProps) {
             };
             displayPayments = [legacyPaymentRecord, ...displayPayments];
           }
+          // Add pending legacy payment (needs manager approval)
+          else if (hasPendingLegacyPayment && !hasLegacyPaymentRecord && legacyPaymentAmount > 0) {
+            const pendingPaymentRecord: PaymentRecord = {
+              id: 'legacy-initial-payment-pending',
+              orderId: order.id || '',
+              orderNumber: order.orderNumber,
+              amount: legacyPaymentAmount,
+              method: order.payment?.type?.includes('stripe') ? 'stripe' : (order.payment?.type as any) || 'other',
+              category: 'initial_deposit',
+              status: 'pending',
+              description: `Initial deposit (${order.payment?.type?.replace(/_/g, ' ') || 'pending'}) - Needs Approval`,
+              createdAt: order.createdAt,
+              updatedAt: order.createdAt,
+              createdBy: order.createdBy || 'system',
+            };
+            displayPayments = [pendingPaymentRecord, ...displayPayments];
+          }
           // Include test payment if exists and no legacy payment
-          else if (order.isTestMode && order.testPaymentAmount && order.testPaymentAmount > 0) {
+          else if (order.isTestMode && order.testPaymentAmount && order.testPaymentAmount > 0 && !hasConfirmedLegacyPayment && !hasPendingLegacyPayment) {
             const testPaymentRecord: PaymentRecord = {
               id: 'initial-test-payment',
               orderId: order.id || '',

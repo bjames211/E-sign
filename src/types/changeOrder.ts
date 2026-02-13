@@ -1,7 +1,7 @@
 import { Timestamp } from 'firebase/firestore';
 import { OrderFile, PendingFile, CustomerInfo, BuildingInfo } from './order';
 
-export type ChangeOrderStatus = 'draft' | 'pending_signature' | 'signed' | 'cancelled';
+export type ChangeOrderStatus = 'draft' | 'pending_signature' | 'signed' | 'cancelled' | 'superseded';
 
 // Change tracking for customer/building fields
 export interface CustomerChange {

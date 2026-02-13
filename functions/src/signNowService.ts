@@ -432,3 +432,153 @@ export async function downloadSignedDocument(
     return null;
   }
 }
+
+/**
+ * Resend a signing invite reminder via SignNow
+ * This sends another email to the signer for an existing document
+ */
+export async function resendSigningInvite(
+  signNowDocumentId: string
+): Promise<{ success: boolean; message: string }> {
+  try {
+    const accessToken = await getAccessToken();
+
+    // Get the document to find the invite ID
+    const docResponse = await axios.get(
+      `${SIGNNOW_API_BASE}/document/${signNowDocumentId}`,
+      {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+        },
+      }
+    );
+
+    const fieldInvites = docResponse.data.field_invites || [];
+
+    if (fieldInvites.length === 0) {
+      return {
+        success: false,
+        message: 'No invites found for this document',
+      };
+    }
+
+    // Resend each pending invite
+    let resendCount = 0;
+    for (const invite of fieldInvites) {
+      if (invite.status === 'pending') {
+        try {
+          // SignNow API to resend invite reminder
+          await axios.post(
+            `${SIGNNOW_API_BASE}/document/${signNowDocumentId}/invite/${invite.id}/reminder`,
+            {},
+            {
+              headers: {
+                Authorization: `Bearer ${accessToken}`,
+                'Content-Type': 'application/json',
+              },
+            }
+          );
+          resendCount++;
+          console.log(`Resent invite reminder: ${invite.id}`);
+        } catch (inviteError: any) {
+          console.warn(`Failed to resend invite ${invite.id}:`, inviteError.response?.data || inviteError.message);
+        }
+      }
+    }
+
+    if (resendCount === 0) {
+      return {
+        success: false,
+        message: 'No pending invites to resend',
+      };
+    }
+
+    return {
+      success: true,
+      message: `Resent ${resendCount} signature invite reminder(s)`,
+    };
+  } catch (error: any) {
+    console.error('Failed to resend signing invite:', error.response?.data || error.message);
+    return {
+      success: false,
+      message: error.response?.data?.message || error.message || 'Failed to resend signing invite',
+    };
+  }
+}
+
+/**
+ * Send a custom reminder email (using SignNow's notification system)
+ */
+export async function sendSignatureReminder(
+  signNowDocumentId: string,
+  customMessage?: string
+): Promise<{ success: boolean; message: string }> {
+  try {
+    const accessToken = await getAccessToken();
+
+    // Get the document details
+    const docResponse = await axios.get(
+      `${SIGNNOW_API_BASE}/document/${signNowDocumentId}`,
+      {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+        },
+      }
+    );
+
+    const fieldInvites = docResponse.data.field_invites || [];
+
+    if (fieldInvites.length === 0) {
+      return {
+        success: false,
+        message: 'No invites found for this document',
+      };
+    }
+
+    // Find pending invites and send reminders
+    let reminderCount = 0;
+    for (const invite of fieldInvites) {
+      if (invite.status === 'pending' && invite.email) {
+        try {
+          // Use SignNow's notification/reminder API
+          await axios.post(
+            `${SIGNNOW_API_BASE}/document/${signNowDocumentId}/remind`,
+            {
+              email: invite.email,
+              subject: 'Reminder: Document awaiting your signature',
+              message: customMessage || 'This is a friendly reminder that you have a document waiting for your signature. Please sign at your earliest convenience.',
+            },
+            {
+              headers: {
+                Authorization: `Bearer ${accessToken}`,
+                'Content-Type': 'application/json',
+              },
+            }
+          );
+          reminderCount++;
+          console.log(`Sent reminder to: ${invite.email}`);
+        } catch (reminderError: any) {
+          console.warn(`Failed to send reminder to ${invite.email}:`, reminderError.response?.data || reminderError.message);
+        }
+      }
+    }
+
+    if (reminderCount === 0) {
+      return {
+        success: false,
+        message: 'No pending invites to send reminders to',
+      };
+    }
+
+    return {
+      success: true,
+      message: `Sent reminder to ${reminderCount} recipient(s)`,
+    };
+  } catch (error: any) {
+    console.error('Failed to send reminder:', error.response?.data || error.message);
+    return {
+      success: false,
+      message: error.response?.data?.message || error.message || 'Failed to send reminder',
+    };
+  }
+}

@@ -121,10 +121,10 @@ function AppContent() {
 
   return (
     <div style={styles.container}>
-      <header style={styles.header}>
-        <div style={styles.headerLeft}>
+      <header className="app-header" style={styles.header}>
+        <div className="app-header-left" style={styles.headerLeft}>
           <h1 style={styles.logo}>BBD E-Sign</h1>
-          <nav style={styles.nav}>
+          <nav className="app-nav" style={styles.nav}>
             {/* Manager-only: Upload PDF */}
             {isManager && (
               <button
@@ -219,7 +219,7 @@ function AppContent() {
             </button>
           </nav>
         </div>
-        <div style={styles.headerRight}>
+        <div className="app-header-right" style={styles.headerRight}>
           {/* Only show search for managers */}
           {isManager && (
             <GlobalSearch

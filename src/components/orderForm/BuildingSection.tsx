@@ -28,7 +28,7 @@ export function BuildingSection({
   return (
     <div style={styles.section}>
       <h3 style={styles.sectionTitle}>Building Project</h3>
-      <div style={styles.grid}>
+      <div className="form-grid" style={styles.grid}>
         <FormDropdown
           label="Manufacturer"
           name="manufacturer"

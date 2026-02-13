@@ -5,6 +5,9 @@ import {
   useElements,
 } from '@stripe/react-stripe-js';
 
+// Check if we're in test mode
+const isTestMode = import.meta.env.VITE_STRIPE_MODE !== 'live';
+
 interface PaymentFormProps {
   onSuccess: (paymentId: string) => void;
   onError: (error: string) => void;
@@ -54,6 +57,13 @@ export function PaymentForm({ onSuccess, onError, amount }: PaymentFormProps) {
 
   return (
     <form onSubmit={handleSubmit} style={styles.form}>
+      {/* Mode indicator banner */}
+      {isTestMode && (
+        <div style={styles.testModeBanner}>
+          TEST MODE - No real charges will be made
+        </div>
+      )}
+
       <div style={styles.amountDisplay}>
         <span>Amount to pay:</span>
         <span style={styles.amount}>${amount.toFixed(2)}</span>
@@ -80,9 +90,12 @@ export function PaymentForm({ onSuccess, onError, amount }: PaymentFormProps) {
         {processing ? 'Processing...' : `Pay $${amount.toFixed(2)}`}
       </button>
 
-      <p style={styles.testNote}>
-        Demo mode: Use card 4242 4242 4242 4242, any future date, any CVC
-      </p>
+      {/* Test card instructions - only show in test mode */}
+      {isTestMode && (
+        <p style={styles.testNote}>
+          Test card: 4242 4242 4242 4242, any future date, any CVC
+        </p>
+      )}
     </form>
   );
 }
@@ -92,6 +105,16 @@ const styles: Record<string, React.CSSProperties> = {
     display: 'flex',
     flexDirection: 'column',
     gap: '16px',
+  },
+  testModeBanner: {
+    backgroundColor: '#fff3cd',
+    color: '#856404',
+    padding: '10px 16px',
+    borderRadius: '4px',
+    fontSize: '13px',
+    fontWeight: 500,
+    textAlign: 'center',
+    border: '1px solid #ffeeba',
   },
   amountDisplay: {
     display: 'flex',

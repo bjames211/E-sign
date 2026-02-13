@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { collection, query, orderBy, onSnapshot, Timestamp } from 'firebase/firestore';
+import { collection, query, orderBy, onSnapshot, Timestamp, limit as firestoreLimit, getDocs, startAfter, QueryDocumentSnapshot, DocumentData, getCountFromServer } from 'firebase/firestore';
 import { db } from '../../config/firebase';
 import { useAuth } from '../../contexts/AuthContext';
 import { Order } from '../../types/order';
@@ -119,6 +119,11 @@ export function SalesDashboard({ onNavigateToChangeOrder }: SalesDashboardProps)
   const [customDateRange, setCustomDateRange] = useState<DateRange>({ start: null, end: null });
   const [showCustomDatePicker, setShowCustomDatePicker] = useState(false);
   const [actionInProgress, setActionInProgress] = useState<string | null>(null); // orderId being processed
+  const SALES_PAGE_SIZE = 100;
+  const [lastOrderDoc, setLastOrderDoc] = useState<QueryDocumentSnapshot<DocumentData> | null>(null);
+  const [hasMoreOrders, setHasMoreOrders] = useState(false);
+  const [totalOrderCount, setTotalOrderCount] = useState(0);
+  const [loadingMore, setLoadingMore] = useState(false);
 
   // Keep filter in sync when forcedSalesPerson changes (e.g. admin switches view-as user)
   useEffect(() => {
@@ -127,12 +132,18 @@ export function SalesDashboard({ onNavigateToChangeOrder }: SalesDashboardProps)
     }
   }, [forcedSalesPerson]);
 
-  // Load orders
+  // Load orders with limit
   useEffect(() => {
     const q = query(
       collection(db, 'orders'),
-      orderBy('createdAt', 'desc')
+      orderBy('createdAt', 'desc'),
+      firestoreLimit(SALES_PAGE_SIZE)
     );
+
+    // Get total count
+    getCountFromServer(query(collection(db, 'orders'))).then(snap => {
+      setTotalOrderCount(snap.data().count);
+    });
 
     const unsubscribe = onSnapshot(q, (snapshot) => {
       const ordersData: Order[] = [];
@@ -149,6 +160,10 @@ export function SalesDashboard({ onNavigateToChangeOrder }: SalesDashboardProps)
       setOrders(ordersData);
       setSalesPersons(Array.from(salesPersonSet).sort());
       setLoading(false);
+      setHasMoreOrders(snapshot.docs.length >= SALES_PAGE_SIZE);
+      if (snapshot.docs.length > 0) {
+        setLastOrderDoc(snapshot.docs[snapshot.docs.length - 1]);
+      }
 
       // Auto-expand current month
       const currentMonth = new Date().toISOString().slice(0, 7);
@@ -197,6 +212,40 @@ export function SalesDashboard({ onNavigateToChangeOrder }: SalesDashboardProps)
 
     return unsubscribe;
   }, []);
+
+  // Load more orders (non-realtime, appends)
+  const loadMoreOrders = async () => {
+    if (!hasMoreOrders || loadingMore || !lastOrderDoc) return;
+    setLoadingMore(true);
+    try {
+      const q = query(
+        collection(db, 'orders'),
+        orderBy('createdAt', 'desc'),
+        startAfter(lastOrderDoc),
+        firestoreLimit(SALES_PAGE_SIZE)
+      );
+      const snapshot = await getDocs(q);
+      const moreOrders: Order[] = [];
+      const salesPersonSet = new Set(salesPersons);
+
+      snapshot.forEach((doc) => {
+        const data = doc.data() as Order;
+        moreOrders.push({ ...data, id: doc.id } as Order & { id: string });
+        if (data.salesPerson) salesPersonSet.add(data.salesPerson);
+      });
+
+      setOrders(prev => [...prev, ...moreOrders]);
+      setSalesPersons(Array.from(salesPersonSet).sort());
+      setHasMoreOrders(snapshot.docs.length >= SALES_PAGE_SIZE);
+      if (snapshot.docs.length > 0) {
+        setLastOrderDoc(snapshot.docs[snapshot.docs.length - 1]);
+      }
+    } catch (err) {
+      console.error('Failed to load more orders:', err);
+    } finally {
+      setLoadingMore(false);
+    }
+  };
 
   // Process orders with change order data
   const processedOrders = React.useMemo(() => {
@@ -602,11 +651,11 @@ export function SalesDashboard({ onNavigateToChangeOrder }: SalesDashboardProps)
   }
 
   return (
-    <div style={styles.container}>
+    <div className="page-container" style={styles.container}>
       {/* Header */}
       <div style={styles.header}>
         <h2 style={styles.title}>Sales Dashboard</h2>
-        <div style={styles.filterRow}>
+        <div className="filter-row" style={styles.filterRow}>
           {/* View Mode Toggle */}
           <div style={styles.viewToggle}>
             <button
@@ -664,8 +713,8 @@ export function SalesDashboard({ onNavigateToChangeOrder }: SalesDashboardProps)
       </div>
 
       {/* Date Range Filter */}
-      <div style={styles.dateFilterRow}>
-        <div style={styles.datePresets}>
+      <div className="filter-row" style={styles.dateFilterRow}>
+        <div className="date-presets" style={styles.datePresets}>
           {[
             { value: 'this-month', label: 'This Month' },
             { value: 'last-month', label: 'Last Month' },
@@ -745,7 +794,7 @@ export function SalesDashboard({ onNavigateToChangeOrder }: SalesDashboardProps)
       </div>
 
       {/* Summary Stats */}
-      <div style={styles.statsGrid}>
+      <div className="stats-grid" style={styles.statsGrid}>
         <div style={styles.statCard}>
           <div style={styles.statValue}>{stats.totalOrders}</div>
           <div style={styles.statLabel}>Total Orders</div>
@@ -822,7 +871,7 @@ export function SalesDashboard({ onNavigateToChangeOrder }: SalesDashboardProps)
 
             {/* Orders Table */}
             {expandedMonths.has(group.monthKey) && (
-              <div style={styles.ordersTable}>
+              <div className="table-responsive" style={styles.ordersTable}>
                 <table style={styles.table}>
                   <thead>
                     <tr style={styles.tableHeaderRow}>
@@ -979,6 +1028,27 @@ export function SalesDashboard({ onNavigateToChangeOrder }: SalesDashboardProps)
             No orders found for the selected filter.
           </div>
         )}
+
+        {hasMoreOrders && (
+          <div style={{ textAlign: 'center', padding: '24px' }}>
+            <button
+              onClick={loadMoreOrders}
+              disabled={loadingMore}
+              style={{
+                padding: '12px 32px',
+                fontSize: 14,
+                fontWeight: 500,
+                color: '#fff',
+                backgroundColor: loadingMore ? '#90caf9' : '#2196F3',
+                border: 'none',
+                borderRadius: 8,
+                cursor: loadingMore ? 'default' : 'pointer',
+              }}
+            >
+              {loadingMore ? 'Loading...' : `Load More Orders (${totalOrderCount - orders.length} remaining)`}
+            </button>
+          </div>
+        )}
       </div>
 
       {/* Order Details Modal */}
@@ -1123,7 +1193,7 @@ const styles: Record<string, React.CSSProperties> = {
   },
   statsGrid: {
     display: 'grid',
-    gridTemplateColumns: 'repeat(6, 1fr)',
+    gridTemplateColumns: 'repeat(auto-fill, minmax(140px, 1fr))',
     gap: '16px',
     marginBottom: '24px',
   },

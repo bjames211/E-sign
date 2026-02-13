@@ -1,5 +1,5 @@
 import { Timestamp } from 'firebase/firestore';
-import { PaymentSummary } from './payment';
+import { PaymentSummary, OrderLedgerSummary } from './payment';
 
 export type OrderStatus = 'draft' | 'pending_payment' | 'sent_for_signature' | 'signed' | 'ready_for_manufacturer';
 
@@ -179,7 +179,8 @@ export interface Order {
   needsManagerApproval?: boolean;
   needsPaymentApproval?: boolean;  // For manual payment types
   depositDiscrepancy?: DepositDiscrepancy;  // Flags if deposit doesn't match expected %
-  paymentSummary?: PaymentSummary;  // Denormalized payment summary for quick access
+  paymentSummary?: PaymentSummary;  // Denormalized payment summary for quick access (legacy)
+  ledgerSummary?: OrderLedgerSummary;  // Payment ledger summary - single source of truth
   needsAudit?: boolean;  // True if deposit discrepancy detected at order creation
   isTestMode?: boolean;  // Test mode - skips PDF validation and SignNow
   testPaymentAmount?: number;  // Test payment amount entered by user

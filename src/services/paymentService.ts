@@ -22,6 +22,11 @@ import {
   PaymentSummary,
   calculatePaymentSummary,
   isPaymentConfirmed,
+  PaymentLedgerEntry,
+  OrderLedgerSummary,
+  PaymentAuditEntry,
+  AllPaymentsFilters,
+  AllPaymentsResponse,
 } from '../types/payment';
 import { Order } from '../types/order';
 
@@ -47,6 +52,7 @@ function removeUndefinedValues<T>(obj: T): T {
 
 const PAYMENTS_COLLECTION = 'payments';
 const ORDERS_COLLECTION = 'orders';
+const LEDGER_COLLECTION = 'payment_ledger';
 
 // Upload proof file to Firebase Storage
 async function uploadProofFile(
@@ -505,4 +511,373 @@ export async function migrateOrderPaymentToRecord(
   }
 
   return createPaymentRecord(order.id, order.orderNumber, paymentData, userId);
+}
+
+// ============================================================
+// PAYMENT LEDGER FUNCTIONS
+// ============================================================
+
+// Get all ledger entries for an order
+export async function getLedgerEntriesForOrder(
+  orderId: string,
+  includeVoided: boolean = false
+): Promise<PaymentLedgerEntry[]> {
+  const q = query(
+    collection(db, LEDGER_COLLECTION),
+    where('orderId', '==', orderId),
+    orderBy('createdAt', 'desc')
+  );
+  const querySnapshot = await getDocs(q);
+
+  return querySnapshot.docs
+    .filter((doc) => includeVoided || doc.data().status !== 'voided')
+    .map((doc) => ({
+      id: doc.id,
+      ...doc.data(),
+    })) as PaymentLedgerEntry[];
+}
+
+// Trigger ledger summary recalculation via cloud function
+export async function recalculateLedgerSummary(orderId: string): Promise<OrderLedgerSummary> {
+  const response = await fetch(
+    `${import.meta.env.VITE_FUNCTIONS_URL || ''}/recalculateLedgerSummary`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ orderId }),
+    }
+  );
+
+  const data = await response.json();
+
+  if (!data.success) {
+    throw new Error(data.error || 'Failed to recalculate ledger summary');
+  }
+
+  return data.summary;
+}
+
+// Add a ledger entry via cloud function
+export async function addLedgerEntry(
+  data: Omit<PaymentLedgerEntry, 'id' | 'createdAt' | 'status'> & {
+    approvalCode?: string;
+    createdBy: string;
+  }
+): Promise<{ entryId: string; summary: OrderLedgerSummary }> {
+  const response = await fetch(
+    `${import.meta.env.VITE_FUNCTIONS_URL || ''}/addLedgerEntry`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+    }
+  );
+
+  const result = await response.json();
+
+  if (!result.success) {
+    throw new Error(result.error || 'Failed to add ledger entry');
+  }
+
+  return {
+    entryId: result.entryId,
+    summary: result.summary,
+  };
+}
+
+// Void a ledger entry via cloud function
+export async function voidLedgerEntry(
+  entryId: string,
+  voidedBy: string,
+  voidReason: string
+): Promise<OrderLedgerSummary> {
+  const response = await fetch(
+    `${import.meta.env.VITE_FUNCTIONS_URL || ''}/voidLedgerEntry`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ entryId, voidedBy, voidReason }),
+    }
+  );
+
+  const data = await response.json();
+
+  if (!data.success) {
+    throw new Error(data.error || 'Failed to void ledger entry');
+  }
+
+  return data.summary;
+}
+
+// Convert legacy PaymentRecord to a display-compatible ledger entry
+export function paymentRecordToLedgerEntry(payment: PaymentRecord): PaymentLedgerEntry {
+  return {
+    id: payment.id,
+    orderId: payment.orderId,
+    orderNumber: payment.orderNumber,
+    changeOrderId: payment.changeOrderId,
+    transactionType: payment.amount < 0 ? 'refund' : 'payment',
+    amount: Math.abs(payment.amount),
+    method: payment.method,
+    category: payment.category as any,
+    status: payment.status as any,
+    stripePaymentId: payment.stripePaymentId,
+    stripeVerified: payment.stripeVerified,
+    stripeAmount: payment.stripeAmount,
+    stripeAmountDollars: payment.stripeAmountDollars,
+    description: payment.description || '',
+    notes: payment.notes,
+    proofFile: payment.proofFile,
+    createdAt: payment.createdAt,
+    createdBy: payment.createdBy,
+    approvedBy: payment.approvedBy,
+    approvedAt: payment.approvedAt,
+  };
+}
+
+// ============================================================
+// LEDGER ENTRY GROUPING HELPERS
+// ============================================================
+
+export interface GroupedLedgerEntries {
+  payments: PaymentLedgerEntry[];         // type === 'payment'
+  refunds: PaymentLedgerEntry[];          // type === 'refund'
+  depositAdjustments: PaymentLedgerEntry[]; // type === 'deposit_increase' | 'deposit_decrease'
+}
+
+/**
+ * Groups ledger entries by their transaction type for display purposes.
+ * Separates actual money movement (payments/refunds) from accounting adjustments.
+ */
+export function groupLedgerEntriesByType(entries: PaymentLedgerEntry[]): GroupedLedgerEntries {
+  const payments: PaymentLedgerEntry[] = [];
+  const refunds: PaymentLedgerEntry[] = [];
+  const depositAdjustments: PaymentLedgerEntry[] = [];
+
+  for (const entry of entries) {
+    switch (entry.transactionType) {
+      case 'payment':
+        payments.push(entry);
+        break;
+      case 'refund':
+        refunds.push(entry);
+        break;
+      case 'deposit_increase':
+      case 'deposit_decrease':
+        depositAdjustments.push(entry);
+        break;
+    }
+  }
+
+  return { payments, refunds, depositAdjustments };
+}
+
+/**
+ * Calculate totals from grouped ledger entries.
+ * Only includes verified/approved entries in totals.
+ */
+export function calculateGroupedTotals(grouped: GroupedLedgerEntries): {
+  totalCharged: number;
+  totalRefunded: number;
+  pendingPayments: number;
+  pendingRefunds: number;
+} {
+  const confirmedStatuses = ['verified', 'approved'];
+
+  const totalCharged = grouped.payments
+    .filter(e => confirmedStatuses.includes(e.status))
+    .reduce((sum, e) => sum + e.amount, 0);
+
+  const totalRefunded = grouped.refunds
+    .filter(e => confirmedStatuses.includes(e.status))
+    .reduce((sum, e) => sum + e.amount, 0);
+
+  const pendingPayments = grouped.payments
+    .filter(e => e.status === 'pending')
+    .reduce((sum, e) => sum + e.amount, 0);
+
+  const pendingRefunds = grouped.refunds
+    .filter(e => e.status === 'pending')
+    .reduce((sum, e) => sum + e.amount, 0);
+
+  return { totalCharged, totalRefunded, pendingPayments, pendingRefunds };
+}
+
+// ============================================================
+// ALL PAYMENTS & AUDIT FUNCTIONS
+// ============================================================
+
+// Extended ledger entry with customer name and order financial info
+export interface EnrichedLedgerEntry extends PaymentLedgerEntry {
+  customerName?: string;
+  orderDeposit?: number;
+  orderBalance?: number;
+  orderBalanceStatus?: string;
+  // Running balance fields (balance after this specific transaction)
+  balanceAfter?: number;
+  depositAtTime?: number;
+}
+
+/**
+ * Get all ledger entries across all orders with filtering and pagination
+ * Powers the "All Payments" tab in the Manager dashboard
+ */
+export async function getAllPayments(
+  filters: AllPaymentsFilters = {}
+): Promise<AllPaymentsResponse & { entries: EnrichedLedgerEntry[] }> {
+  const params = new URLSearchParams();
+
+  if (filters.status && filters.status !== 'all') {
+    params.append('status', filters.status);
+  }
+  if (filters.transactionType && filters.transactionType !== 'all') {
+    params.append('transactionType', filters.transactionType);
+  }
+  if (filters.startDate) {
+    params.append('startDate', filters.startDate.toISOString());
+  }
+  if (filters.endDate) {
+    params.append('endDate', filters.endDate.toISOString());
+  }
+  if (filters.search) {
+    params.append('search', filters.search);
+  }
+  if (filters.limit) {
+    params.append('limit', filters.limit.toString());
+  }
+  if (filters.offset) {
+    params.append('offset', filters.offset.toString());
+  }
+
+  const response = await fetch(
+    `${import.meta.env.VITE_FUNCTIONS_URL || ''}/getAllLedgerEntries?${params.toString()}`,
+    {
+      method: 'GET',
+      headers: { 'Content-Type': 'application/json' },
+    }
+  );
+
+  const data = await response.json();
+
+  if (data.error) {
+    throw new Error(data.error);
+  }
+
+  return {
+    entries: data.entries as EnrichedLedgerEntry[],
+    total: data.total,
+    hasMore: data.hasMore,
+  };
+}
+
+/**
+ * Get audit history for a specific payment
+ */
+export async function getPaymentAuditHistory(
+  ledgerEntryId: string
+): Promise<PaymentAuditEntry[]> {
+  const response = await fetch(
+    `${import.meta.env.VITE_FUNCTIONS_URL || ''}/getAuditHistoryForPayment?ledgerEntryId=${encodeURIComponent(ledgerEntryId)}`,
+    {
+      method: 'GET',
+      headers: { 'Content-Type': 'application/json' },
+    }
+  );
+
+  const data = await response.json();
+
+  if (data.error) {
+    throw new Error(data.error);
+  }
+
+  return data.entries as PaymentAuditEntry[];
+}
+
+/**
+ * Get audit history for all payments in an order
+ */
+export async function getOrderAuditHistory(
+  orderId: string
+): Promise<PaymentAuditEntry[]> {
+  const response = await fetch(
+    `${import.meta.env.VITE_FUNCTIONS_URL || ''}/getAuditHistoryForOrder?orderId=${encodeURIComponent(orderId)}`,
+    {
+      method: 'GET',
+      headers: { 'Content-Type': 'application/json' },
+    }
+  );
+
+  const data = await response.json();
+
+  if (data.error) {
+    throw new Error(data.error);
+  }
+
+  return data.entries as PaymentAuditEntry[];
+}
+
+/**
+ * Export payments to CSV format
+ */
+export function exportPaymentsToCSV(entries: EnrichedLedgerEntry[]): string {
+  const headers = [
+    'Payment Number',
+    'Date',
+    'Order Number',
+    'Customer',
+    'Type',
+    'Amount',
+    'Deposit Required',
+    'Balance',
+    'Balance Status',
+    'Method',
+    'Status',
+    'Stripe ID',
+    'Description',
+  ];
+
+  const rows = entries.map(entry => {
+    const date = entry.createdAt
+      ? new Date((entry.createdAt as any).seconds * 1000).toLocaleDateString()
+      : '';
+
+    return [
+      entry.paymentNumber || entry.id || '',
+      date,
+      entry.orderNumber,
+      entry.customerName || '',
+      entry.transactionType,
+      entry.amount.toFixed(2),
+      (entry.orderDeposit || 0).toFixed(2),
+      (entry.orderBalance || 0).toFixed(2),
+      entry.orderBalanceStatus || '',
+      entry.method,
+      entry.status,
+      entry.stripePaymentId || '',
+      entry.description || '',
+    ];
+  });
+
+  const csvContent = [
+    headers.join(','),
+    ...rows.map(row => row.map(cell => `"${String(cell).replace(/"/g, '""')}"`).join(',')),
+  ].join('\n');
+
+  return csvContent;
+}
+
+/**
+ * Download CSV file
+ */
+export function downloadCSV(csvContent: string, filename: string): void {
+  const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+  const link = document.createElement('a');
+  const url = URL.createObjectURL(blob);
+
+  link.setAttribute('href', url);
+  link.setAttribute('download', filename);
+  link.style.visibility = 'hidden';
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
 }

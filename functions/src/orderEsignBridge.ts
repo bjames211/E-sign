@@ -5,6 +5,7 @@ import Stripe from 'stripe';
 import { addDocumentToSheet } from './googleSheetsService';
 import { sendForSignature } from './signNowService';
 import { extractDataFromPdf, ExtractedPdfData } from './pdfExtractor';
+import { createLedgerEntry, updateOrderLedgerSummary } from './paymentLedgerFunctions';
 
 // Initialize Stripe
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || 'sk_test_placeholder', {
@@ -895,11 +896,43 @@ export async function updateOrderOnSigned(esignDocumentId: string): Promise<void
   if (changeOrderId) {
     console.log(`This is a change order signature. Updating change order: ${changeOrderId}`);
     const changeOrderRef = db.collection('change_orders').doc(changeOrderId);
+    const changeOrderSnap = await changeOrderRef.get();
+    const changeOrderData = changeOrderSnap.data();
+
     await changeOrderRef.update({
       status: 'signed',
       signedAt: admin.firestore.FieldValue.serverTimestamp(),
     });
     console.log(`Change order ${changeOrderId} marked as signed`);
+
+    // Create ledger entry for deposit adjustment if there's a difference
+    if (changeOrderData?.differences?.depositDiff && changeOrderData.differences.depositDiff !== 0) {
+      const depositDiff = changeOrderData.differences.depositDiff;
+      const transactionType = depositDiff > 0 ? 'deposit_increase' : 'deposit_decrease';
+
+      try {
+        await createLedgerEntry({
+          orderId: orderRef.id,
+          orderNumber: orderData.orderNumber,
+          changeOrderId: changeOrderId,
+          changeOrderNumber: changeOrderData.changeOrderNumber,
+          transactionType: transactionType as any,
+          amount: Math.abs(depositDiff),
+          method: 'other',
+          category: 'change_order_adjustment',
+          status: 'approved',
+          description: `Deposit ${depositDiff > 0 ? 'increase' : 'decrease'} from ${changeOrderData.changeOrderNumber}`,
+          createdBy: 'esign_webhook',
+        }, db);
+
+        // Update ledger summary
+        await updateOrderLedgerSummary(orderRef.id, db);
+        console.log(`Ledger entry created for change order ${changeOrderId} deposit adjustment: $${depositDiff}`);
+      } catch (ledgerError) {
+        console.error('Error creating ledger entry for change order:', ledgerError);
+        // Don't fail the webhook if ledger creation fails
+      }
+    }
   }
 
   // Check if payment is complete - handle old orders without payment.status
@@ -1765,6 +1798,35 @@ export const testSignChangeOrder = functions.https.onRequest(async (req, res) =>
       },
       updatedAt: admin.firestore.FieldValue.serverTimestamp(),
     });
+
+    // Create ledger entry for deposit adjustment if there's a difference
+    if (changeOrderData.differences?.depositDiff && changeOrderData.differences.depositDiff !== 0) {
+      const depositDiff = changeOrderData.differences.depositDiff;
+      const transactionType = depositDiff > 0 ? 'deposit_increase' : 'deposit_decrease';
+
+      try {
+        await createLedgerEntry({
+          orderId: changeOrderData.orderId,
+          orderNumber: orderData?.orderNumber || '',
+          changeOrderId: changeOrderId,
+          changeOrderNumber: changeOrderData.changeOrderNumber,
+          transactionType: transactionType as any,
+          amount: Math.abs(depositDiff),
+          method: 'other',
+          category: 'change_order_adjustment',
+          status: 'approved',
+          description: `Deposit ${depositDiff > 0 ? 'increase' : 'decrease'} from ${changeOrderData.changeOrderNumber} (test mode)`,
+          createdBy: 'test_sign',
+        }, db);
+
+        // Update ledger summary
+        await updateOrderLedgerSummary(changeOrderData.orderId, db);
+        console.log(`TEST MODE: Ledger entry created for change order deposit adjustment: $${depositDiff}`);
+      } catch (ledgerError) {
+        console.error('Error creating ledger entry for test change order:', ledgerError);
+        // Don't fail if ledger creation fails
+      }
+    }
 
     // Update esign document if exists
     if (changeOrderData.esignDocumentId) {

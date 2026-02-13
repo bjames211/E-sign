@@ -23,7 +23,7 @@ export function CustomerSection({
   return (
     <div style={styles.section}>
       <h3 style={styles.sectionTitle}>Customer Contact</h3>
-      <div style={styles.grid}>
+      <div className="form-grid" style={styles.grid}>
         <FormField
           label="First Name"
           name="firstName"

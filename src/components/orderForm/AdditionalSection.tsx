@@ -23,7 +23,7 @@ export function AdditionalSection({
   return (
     <div style={styles.section}>
       <h3 style={styles.sectionTitle}>Additional Information</h3>
-      <div style={styles.grid}>
+      <div className="form-grid" style={styles.grid}>
         <FormField
           label="Referred By"
           name="referredBy"

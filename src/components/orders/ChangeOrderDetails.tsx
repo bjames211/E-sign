@@ -1,5 +1,5 @@
 import React from 'react';
-import { ChangeOrder, ChangeOrderStatus } from '../../types/changeOrder';
+import { ChangeOrder } from '../../types/changeOrder';
 import { Timestamp } from 'firebase/firestore';
 
 interface ChangeOrderDetailsProps {
@@ -8,11 +8,12 @@ interface ChangeOrderDetailsProps {
   onEdit?: () => void;
 }
 
-const STATUS_STYLES: Record<ChangeOrderStatus, { bg: string; color: string; label: string }> = {
+const STATUS_STYLES: Record<string, { bg: string; color: string; label: string }> = {
   draft: { bg: '#f5f5f5', color: '#666', label: 'Draft' },
   pending_signature: { bg: '#e3f2fd', color: '#1565c0', label: 'Awaiting Signature' },
   signed: { bg: '#e8f5e9', color: '#2e7d32', label: 'Signed' },
   cancelled: { bg: '#ffebee', color: '#c62828', label: 'Cancelled' },
+  superseded: { bg: '#f5f5f5', color: '#999', label: 'Superseded' },
 };
 
 function formatDate(timestamp: Timestamp | any | undefined): string {
@@ -54,7 +55,7 @@ function formatDiff(value: number): string {
 }
 
 export function ChangeOrderDetails({ changeOrder, onClose, onEdit }: ChangeOrderDetailsProps) {
-  const statusStyle = STATUS_STYLES[changeOrder.status];
+  const statusStyle = STATUS_STYLES[changeOrder.status] || STATUS_STYLES.draft;
   const hasCustomerChanges = changeOrder.customerChanges && changeOrder.customerChanges.length > 0;
   const hasBuildingChanges = changeOrder.buildingChanges && changeOrder.buildingChanges.length > 0;
   const hasFiles = changeOrder.files && (

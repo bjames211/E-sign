@@ -2,7 +2,11 @@ import React, { useState, useEffect } from 'react';
 import { OrderCard } from './OrderCard';
 import { OrderDetails } from './OrderDetails';
 import { Order, OrderStatus } from '../../types/order';
-import { getOrders, deleteOrder } from '../../services/orderService';
+import { getOrdersPaginated, deleteOrder } from '../../services/orderService';
+import { getChangeOrdersForOrder } from '../../services/changeOrderService';
+import { QueryDocumentSnapshot, DocumentData } from 'firebase/firestore';
+
+const PAGE_SIZE = 50;
 
 const STATUS_FILTERS: { value: OrderStatus | 'all'; label: string }[] = [
   { value: 'all', label: 'All Orders' },
@@ -15,9 +19,18 @@ const STATUS_FILTERS: { value: OrderStatus | 'all'; label: string }[] = [
 
 interface OrdersListProps {
   onNavigateToChangeOrder?: (orderId: string, changeOrderId?: string) => void;
+  initialOrderNumber?: string | null;
+  onInitialOrderHandled?: () => void;
 }
 
-export function OrdersList({ onNavigateToChangeOrder }: OrdersListProps) {
+// Effective values from live change orders
+interface EffectiveCOValues {
+  deposit: number;
+  total: number;
+  changeOrderNumber?: string;
+}
+
+export function OrdersList({ onNavigateToChangeOrder, initialOrderNumber, onInitialOrderHandled }: OrdersListProps) {
   const [orders, setOrders] = useState<Order[]>([]);
   const [filteredOrders, setFilteredOrders] = useState<Order[]>([]);
   const [loading, setLoading] = useState(true);
@@ -26,6 +39,12 @@ export function OrdersList({ onNavigateToChangeOrder }: OrdersListProps) {
   const [openWithPaymentApproval, setOpenWithPaymentApproval] = useState(false);
   const [statusFilter, setStatusFilter] = useState<OrderStatus | 'all'>('all');
   const [searchTerm, setSearchTerm] = useState('');
+  // Map of orderId -> effective CO values for orders with pending_signature COs
+  const [effectiveCOValuesMap, setEffectiveCOValuesMap] = useState<Record<string, EffectiveCOValues>>({});
+  const [lastDoc, setLastDoc] = useState<QueryDocumentSnapshot<DocumentData> | null>(null);
+  const [hasMore, setHasMore] = useState(false);
+  const [totalCount, setTotalCount] = useState(0);
+  const [loadingMore, setLoadingMore] = useState(false);
 
   useEffect(() => {
     loadOrders();
@@ -35,17 +54,85 @@ export function OrdersList({ onNavigateToChangeOrder }: OrdersListProps) {
     filterOrders();
   }, [orders, statusFilter, searchTerm]);
 
+  // Auto-select order from URL parameter
+  useEffect(() => {
+    if (initialOrderNumber && orders.length > 0 && !selectedOrder) {
+      const order = orders.find(o => o.orderNumber === initialOrderNumber);
+      if (order) {
+        setSelectedOrder(order);
+        onInitialOrderHandled?.();
+      }
+    }
+  }, [initialOrderNumber, orders, selectedOrder, onInitialOrderHandled]);
+
   const loadOrders = async () => {
     setLoading(true);
     setError(null);
     try {
-      const data = await getOrders();
-      setOrders(data);
+      const result = await getOrdersPaginated(PAGE_SIZE);
+      setOrders(result.orders);
+      setLastDoc(result.lastDoc);
+      setHasMore(result.hasMore);
+      setTotalCount(result.totalCount);
+      await loadCOValues(result.orders);
     } catch (err) {
       setError('Failed to load orders');
       console.error(err);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const loadMoreOrders = async () => {
+    if (!hasMore || loadingMore) return;
+    setLoadingMore(true);
+    try {
+      const result = await getOrdersPaginated(PAGE_SIZE, lastDoc);
+      setOrders(prev => [...prev, ...result.orders]);
+      setLastDoc(result.lastDoc);
+      setHasMore(result.hasMore);
+      await loadCOValues(result.orders, true);
+    } catch (err) {
+      console.error('Failed to load more orders:', err);
+    } finally {
+      setLoadingMore(false);
+    }
+  };
+
+  const loadCOValues = async (ordersList: Order[], append = false) => {
+    const ordersWithPendingCOs = ordersList.filter(o => o.activeChangeOrderStatus === 'pending_signature' && o.id);
+    if (ordersWithPendingCOs.length > 0) {
+      const coPromises = ordersWithPendingCOs.map(async (order) => {
+        try {
+          const cos = await getChangeOrdersForOrder(order.id!);
+          const liveCO = cos.find(co => co.status === 'pending_signature');
+          if (liveCO) {
+            return {
+              orderId: order.id!,
+              values: {
+                deposit: liveCO.newValues.deposit,
+                total: liveCO.newValues.subtotalBeforeTax + (liveCO.newValues.extraMoneyFluff || 0),
+                changeOrderNumber: liveCO.changeOrderNumber,
+              } as EffectiveCOValues,
+            };
+          }
+          return null;
+        } catch (err) {
+          console.error(`Failed to load COs for ${order.orderNumber}:`, err);
+          return null;
+        }
+      });
+
+      const results = await Promise.all(coPromises);
+      const newMap: Record<string, EffectiveCOValues> = {};
+      results.forEach(result => {
+        if (result) {
+          newMap[result.orderId] = result.values;
+        }
+      });
+      setEffectiveCOValuesMap(prev => append ? { ...prev, ...newMap } : newMap);
+    } else if (!append) {
+      setEffectiveCOValuesMap({});
     }
   };
 
@@ -224,7 +311,7 @@ export function OrdersList({ onNavigateToChangeOrder }: OrdersListProps) {
     <div style={styles.container}>
       <div style={styles.header}>
         <h2 style={styles.title}>Orders</h2>
-        <p style={styles.subtitle}>{orders.length} total orders</p>
+        <p style={styles.subtitle}>Showing {orders.length} of {totalCount} orders</p>
       </div>
 
       {error && <div style={styles.error}>{error}</div>}
@@ -269,16 +356,39 @@ export function OrdersList({ onNavigateToChangeOrder }: OrdersListProps) {
           )}
         </div>
       ) : (
-        <div style={styles.grid}>
-          {filteredOrders.map((order) => (
-            <OrderCard
-              key={order.id}
-              order={order}
-              onClick={() => setSelectedOrder(order)}
-              onApprovePayment={handleApprovePaymentFromCard}
-            />
-          ))}
-        </div>
+        <>
+          <div style={styles.grid}>
+            {filteredOrders.map((order) => (
+              <OrderCard
+                key={order.id}
+                order={order}
+                onClick={() => setSelectedOrder(order)}
+                onApprovePayment={handleApprovePaymentFromCard}
+                effectiveCOValues={order.id ? effectiveCOValuesMap[order.id] : undefined}
+              />
+            ))}
+          </div>
+          {hasMore && (
+            <div style={{ textAlign: 'center', padding: '24px' }}>
+              <button
+                onClick={loadMoreOrders}
+                disabled={loadingMore}
+                style={{
+                  padding: '12px 32px',
+                  fontSize: 14,
+                  fontWeight: 500,
+                  color: '#fff',
+                  backgroundColor: loadingMore ? '#90caf9' : '#2196F3',
+                  border: 'none',
+                  borderRadius: 8,
+                  cursor: loadingMore ? 'default' : 'pointer',
+                }}
+              >
+                {loadingMore ? 'Loading...' : `Load More (${totalCount - orders.length} remaining)`}
+              </button>
+            </div>
+          )}
+        </>
       )}
 
       {/* Order Details Modal */}

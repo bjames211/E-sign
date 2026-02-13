@@ -280,7 +280,7 @@ export function OrderForm({ onOrderCreated }: OrderFormProps) {
       {/* Order Info Section - At Top */}
       <div style={styles.orderInfoSection}>
         <h3 style={styles.sectionTitle}>Order Info</h3>
-        <div style={styles.orderInfoGrid}>
+        <div className="form-grid" style={styles.orderInfoGrid}>
           <div style={styles.fieldGroup}>
             <label style={styles.label}>
               Sales Person <span style={styles.required}>*</span>

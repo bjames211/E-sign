@@ -1,5 +1,5 @@
 import React from 'react';
-import { ChangeOrder, ChangeOrderStatus } from '../../types/changeOrder';
+import { ChangeOrder } from '../../types/changeOrder';
 import { Timestamp } from 'firebase/firestore';
 
 interface ChangeOrderCardProps {
@@ -10,11 +10,12 @@ interface ChangeOrderCardProps {
   sending?: boolean;
 }
 
-const STATUS_STYLES: Record<ChangeOrderStatus, { bg: string; color: string; label: string }> = {
+const STATUS_STYLES: Record<string, { bg: string; color: string; label: string }> = {
   draft: { bg: '#fff3e0', color: '#e65100', label: 'Draft' },
   pending_signature: { bg: '#e3f2fd', color: '#1565c0', label: 'Awaiting Signature' },
   signed: { bg: '#e8f5e9', color: '#2e7d32', label: 'Signed' },
   cancelled: { bg: '#f5f5f5', color: '#999', label: 'Cancelled' },
+  superseded: { bg: '#f5f5f5', color: '#999', label: 'Superseded' },
 };
 
 function formatDate(timestamp: Timestamp | any | undefined): string {
@@ -55,7 +56,7 @@ export function ChangeOrderCard({
   isTestMode,
   sending,
 }: ChangeOrderCardProps) {
-  const statusStyle = STATUS_STYLES[co.status];
+  const statusStyle = STATUS_STYLES[co.status] || STATUS_STYLES.draft;
   const isDraft = co.status === 'draft';
   const isPendingSignature = co.status === 'pending_signature';
   const isCancelled = co.status === 'cancelled';

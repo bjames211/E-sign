@@ -37,7 +37,7 @@ export function PricingSection({ pricing, onChange }: PricingSectionProps) {
   return (
     <div style={styles.section}>
       <h3 style={styles.sectionTitle}>Pricing</h3>
-      <div style={styles.grid}>
+      <div className="form-grid" style={styles.grid}>
         <div style={styles.inputWrapper}>
           <span style={styles.currencyPrefix}>$</span>
           <FormField

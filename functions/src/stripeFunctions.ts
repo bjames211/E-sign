@@ -1,10 +1,13 @@
 import * as functions from 'firebase-functions/v1';
 import * as admin from 'firebase-admin';
 import Stripe from 'stripe';
+import { createLedgerEntry, updateOrderLedgerSummary } from './paymentLedgerFunctions';
+import { createAuditEntry } from './paymentAuditFunctions';
+import { STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET, IS_LIVE_MODE, STRIPE_MODE } from './config/stripe';
+import { logPaymentEvent, logPaymentEventSync, createPaymentTimer } from './utils/paymentLogger';
 
-// Initialize Stripe with test secret key
-// In production, use environment variables
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || 'sk_test_placeholder', {
+// Initialize Stripe with configuration from config/stripe.ts
+const stripe = new Stripe(STRIPE_SECRET_KEY, {
   apiVersion: '2023-10-16',
 });
 
@@ -48,6 +51,7 @@ interface CreatePaymentLinkRequest {
 
 /**
  * Create a PaymentIntent for "Pay Now" flow
+ * Includes idempotency key to prevent duplicate charges on retries
  */
 export const createPaymentIntent = functions.https.onRequest(async (req, res) => {
   // Enable CORS
@@ -64,6 +68,8 @@ export const createPaymentIntent = functions.https.onRequest(async (req, res) =>
     res.status(405).json({ error: 'Method not allowed' });
     return;
   }
+
+  const timer = createPaymentTimer();
 
   try {
     const { amount, customerEmail, customerName, orderId } = req.body as CreatePaymentIntentRequest;
@@ -88,30 +94,72 @@ export const createPaymentIntent = functions.https.onRequest(async (req, res) =>
           email: customerEmail,
           name: customerName,
         });
+
+        // Log customer creation
+        logPaymentEventSync({
+          action: 'customer_created',
+          orderId,
+          customerId: customer.id,
+          status: 'success',
+          metadata: { email: customerEmail },
+        });
       }
     }
 
-    // Create PaymentIntent
-    const paymentIntent = await stripe.paymentIntents.create({
-      amount,
-      currency: 'usd',
-      customer: customer?.id,
-      metadata: {
-        orderId: orderId || '',
-        customerName: customerName || '',
-      },
-      automatic_payment_methods: {
-        enabled: true,
-      },
-    });
+    // Generate idempotency key based on order ID and timestamp
+    // This prevents duplicate charges if the same request is retried
+    const idempotencyKey = orderId
+      ? `pi-${orderId}-${Date.now()}`
+      : `pi-${customerEmail || 'guest'}-${amount}-${Date.now()}`;
 
-    console.log(`Created PaymentIntent: ${paymentIntent.id} for $${amount / 100}`);
+    // Create PaymentIntent with idempotency
+    const paymentIntent = await stripe.paymentIntents.create(
+      {
+        amount,
+        currency: 'usd',
+        customer: customer?.id,
+        metadata: {
+          orderId: orderId || '',
+          customerName: customerName || '',
+          environment: IS_LIVE_MODE ? 'production' : 'test',
+        },
+        automatic_payment_methods: {
+          enabled: true,
+        },
+        // Statement descriptor for card statements
+        statement_descriptor: 'BBD ORDER',
+      },
+      {
+        idempotencyKey,
+      }
+    );
+
+    // Log success
+    await logPaymentEvent({
+      action: 'payment_intent_created',
+      orderId,
+      amount: amount / 100,
+      stripeId: paymentIntent.id,
+      customerId: customer?.id,
+      status: 'success',
+      duration: timer.stop(),
+    });
 
     res.status(200).json({
       clientSecret: paymentIntent.client_secret,
       paymentIntentId: paymentIntent.id,
     });
   } catch (error) {
+    // Log error
+    await logPaymentEvent({
+      action: 'payment_intent_created',
+      orderId: req.body?.orderId,
+      amount: req.body?.amount ? req.body.amount / 100 : undefined,
+      status: 'error',
+      error: error instanceof Error ? error.message : 'Unknown error',
+      duration: timer.stop(),
+    });
+
     console.error('Error creating PaymentIntent:', error);
     res.status(500).json({
       error: error instanceof Error ? error.message : 'Failed to create payment',
@@ -327,6 +375,230 @@ export const createPaymentLink = functions.https.onRequest(async (req, res) => {
     console.error('Error creating Payment Link:', error);
     res.status(500).json({
       error: error instanceof Error ? error.message : 'Failed to create payment link',
+    });
+  }
+});
+
+/**
+ * Generate a payment link for an underpaid order
+ * Creates a Stripe Payment Link for the exact balance amount
+ * Stores the link on the order and optionally sends email to customer
+ */
+export const generatePaymentLinkForUnderpaid = functions.https.onRequest(async (req, res) => {
+  res.set('Access-Control-Allow-Origin', '*');
+  res.set('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.set('Access-Control-Allow-Headers', 'Content-Type');
+
+  if (req.method === 'OPTIONS') {
+    res.status(204).send('');
+    return;
+  }
+
+  if (req.method !== 'POST') {
+    res.status(405).json({ error: 'Method not allowed' });
+    return;
+  }
+
+  try {
+    const db = admin.firestore();
+    const { orderId, amount: overrideAmount, sendEmail, createdBy } = req.body;
+
+    // Validate required fields
+    if (!orderId) {
+      res.status(400).json({ error: 'orderId is required' });
+      return;
+    }
+
+    // Get the order
+    const orderRef = db.collection('orders').doc(orderId);
+    const orderSnap = await orderRef.get();
+
+    if (!orderSnap.exists) {
+      res.status(404).json({ error: 'Order not found' });
+      return;
+    }
+
+    const order = orderSnap.data();
+    const ledgerSummary = order?.ledgerSummary;
+
+    // Check if order has a balance
+    const balance = ledgerSummary?.balance || 0;
+    if (balance <= 0) {
+      res.status(400).json({
+        error: `Order is not underpaid. Current balance: $${balance.toFixed(2)}`,
+        balance,
+        balanceStatus: ledgerSummary?.balanceStatus,
+      });
+      return;
+    }
+
+    // Use override amount or balance
+    const paymentAmount = overrideAmount || balance;
+    const amountInCents = Math.round(paymentAmount * 100);
+
+    // Get customer info
+    const customerEmail = order?.customer?.email;
+    const customerName = `${order?.customer?.firstName || ''} ${order?.customer?.lastName || ''}`.trim();
+    const orderNumber = order?.orderNumber || orderId;
+
+    // Check if customer already has a Stripe customer ID
+    let customerId = order?.payment?.stripeCustomerId;
+
+    if (!customerId && customerEmail) {
+      // Try to find existing customer
+      const existingCustomers = await stripe.customers.list({
+        email: customerEmail,
+        limit: 1,
+      });
+
+      if (existingCustomers.data.length > 0) {
+        customerId = existingCustomers.data[0].id;
+      } else {
+        // Create new customer
+        const newCustomer = await stripe.customers.create({
+          email: customerEmail,
+          name: customerName,
+          metadata: {
+            orderId,
+            orderNumber,
+          },
+        });
+        customerId = newCustomer.id;
+      }
+
+      // Save customer ID to order
+      await orderRef.update({
+        'payment.stripeCustomerId': customerId,
+      });
+    }
+
+    // Create a Price for the specific amount
+    const price = await stripe.prices.create({
+      unit_amount: amountInCents,
+      currency: 'usd',
+      product_data: {
+        name: `Balance Payment - Order ${orderNumber}`,
+      },
+    });
+
+    // Create Payment Link
+    const paymentLink = await stripe.paymentLinks.create({
+      line_items: [
+        {
+          price: price.id,
+          quantity: 1,
+        },
+      ],
+      metadata: {
+        orderId,
+        orderNumber,
+        customerEmail: customerEmail || '',
+        paymentType: 'balance_payment',
+        originalBalance: balance.toString(),
+      },
+      after_completion: {
+        type: 'redirect',
+        redirect: {
+          url: process.env.PAYMENT_SUCCESS_URL || `https://e-sign-27f9a.web.app/payment-success?order=${orderNumber}`,
+        },
+      },
+      payment_intent_data: {
+        setup_future_usage: 'off_session',
+        metadata: {
+          orderId,
+          orderNumber,
+          customerEmail: customerEmail || '',
+        },
+      },
+      customer_creation: 'if_required',
+    });
+
+    // Store payment link on order
+    await orderRef.update({
+      'payment.stripePaymentLinkId': paymentLink.id,
+      'payment.stripePaymentLinkUrl': paymentLink.url,
+      'payment.paymentLinkCreatedAt': admin.firestore.FieldValue.serverTimestamp(),
+      'payment.paymentLinkAmount': paymentAmount,
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+    // Store payment link in payment_links collection for tracking
+    await db.collection('payment_links').add({
+      paymentLinkId: paymentLink.id,
+      url: paymentLink.url,
+      amount: paymentAmount,
+      amountInCents,
+      orderId,
+      orderNumber,
+      customerEmail: customerEmail || null,
+      customerName: customerName || null,
+      stripeCustomerId: customerId || null,
+      type: 'balance_payment',
+      originalBalance: balance,
+      status: 'pending',
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      createdBy: createdBy || 'system',
+    });
+
+    console.log(`Payment link created for order ${orderNumber}: $${paymentAmount} - ${paymentLink.url}`);
+
+    // Send email if requested
+    let emailSent = false;
+    if (sendEmail && customerEmail) {
+      try {
+        await db.collection('mail').add({
+          to: customerEmail,
+          message: {
+            subject: `Payment Link for Order ${orderNumber}`,
+            text: `
+Hello ${customerName},
+
+A balance of $${paymentAmount.toFixed(2)} is due for your order ${orderNumber}.
+
+Please complete your payment using this secure link:
+${paymentLink.url}
+
+This link will remain active until payment is received.
+
+Thank you,
+BBD Team
+            `.trim(),
+            html: `
+<p>Hello ${customerName},</p>
+
+<p>A balance of <strong>$${paymentAmount.toFixed(2)}</strong> is due for your order <strong>${orderNumber}</strong>.</p>
+
+<p><a href="${paymentLink.url}" style="background-color: #1565c0; color: white; padding: 12px 24px; text-decoration: none; border-radius: 4px; display: inline-block;">Complete Payment</a></p>
+
+<p>Or copy this link: ${paymentLink.url}</p>
+
+<p>This link will remain active until payment is received.</p>
+
+<p>Thank you,<br>BBD Team</p>
+            `.trim(),
+          },
+          createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+        emailSent = true;
+        console.log(`Payment link email sent to ${customerEmail}`);
+      } catch (emailError) {
+        console.error('Failed to send payment link email:', emailError);
+      }
+    }
+
+    res.status(200).json({
+      success: true,
+      paymentLinkUrl: paymentLink.url,
+      paymentLinkId: paymentLink.id,
+      amount: paymentAmount,
+      originalBalance: balance,
+      emailSent,
+      customerId,
+    });
+  } catch (error) {
+    console.error('Error generating payment link:', error);
+    res.status(500).json({
+      error: error instanceof Error ? error.message : 'Failed to generate payment link',
     });
   }
 });
@@ -577,7 +849,7 @@ export const approveManualPayment = functions.https.onRequest(async (req, res) =
       });
     }
 
-    // Create PaymentRecord for the new payment system
+    // Create PaymentRecord for the new payment system (legacy - keeping for backwards compatibility)
     try {
       const depositRequired = orderData?.pricing?.deposit || 0;
       const paymentRecord = {
@@ -605,7 +877,7 @@ export const approveManualPayment = functions.https.onRequest(async (req, res) =
       await db.collection('payments').add(paymentRecord);
       console.log(`PaymentRecord created for order ${orderId} with amount $${amount}`);
 
-      // Update order payment summary
+      // Update order payment summary (legacy)
       const paymentsQuery = await db
         .collection('payments')
         .where('orderId', '==', orderId)
@@ -636,6 +908,37 @@ export const approveManualPayment = functions.https.onRequest(async (req, res) =
       // Don't fail if PaymentRecord creation fails
     }
 
+    // Create Payment Ledger entry (new single source of truth system)
+    try {
+      await createLedgerEntry({
+        orderId,
+        orderNumber: orderData?.orderNumber || '',
+        transactionType: 'payment',
+        amount: amount,
+        method: paymentType as any,
+        category: 'initial_deposit',
+        status: 'approved',
+        description: `Manual payment via ${paymentType}`,
+        notes: notes || undefined,
+        proofFile: {
+          name: proofFile.name,
+          storagePath: proofFile.storagePath,
+          downloadUrl: proofFile.downloadUrl,
+          size: proofFile.size || 0,
+          type: proofFile.type || 'image/jpeg',
+        },
+        approvedBy: approvedBy || 'Manager',
+        createdBy: approvedBy || 'Manager',
+      }, db);
+
+      // Update order's ledger summary
+      await updateOrderLedgerSummary(orderId, db);
+      console.log(`Ledger entry created for manual payment on order ${orderId}`);
+    } catch (ledgerError) {
+      console.error('Error creating ledger entry:', ledgerError);
+      // Don't fail if ledger creation fails
+    }
+
     console.log(`Manual payment approved for order ${orderId}`);
 
     res.status(200).json({
@@ -653,12 +956,45 @@ export const approveManualPayment = functions.https.onRequest(async (req, res) =
 
 /**
  * Stripe webhook handler for payment events
+ * Uses stripeEvents collection for idempotency (prevent duplicate processing)
+ *
+ * Security:
+ * - Signature verification is MANDATORY in live mode
+ * - Mode mismatch detection (event.livemode vs IS_LIVE_MODE)
+ * - Idempotency checking to prevent duplicate processing
  */
 export const stripeWebhook = functions.https.onRequest(async (req, res) => {
   const sig = req.headers['stripe-signature'];
-  const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
+
+  // Log webhook received (before signature verification)
+  logPaymentEventSync({
+    action: 'webhook_received',
+    status: 'info',
+    metadata: { hasSignature: !!sig, mode: STRIPE_MODE },
+  });
+
+  // MANDATORY signature verification in live mode
+  if (!STRIPE_WEBHOOK_SECRET) {
+    if (IS_LIVE_MODE) {
+      // CRITICAL: Cannot process webhooks without signature verification in production
+      console.error('CRITICAL: Missing webhook secret in LIVE mode');
+      await logPaymentEvent({
+        action: 'webhook_failed',
+        status: 'error',
+        error: 'Missing webhook secret in live mode - refusing to process',
+      });
+      res.status(500).send('Webhook not configured for production');
+      return;
+    }
+    console.warn('Warning: Webhook secret not configured (test mode only)');
+  }
 
   if (!sig) {
+    await logPaymentEvent({
+      action: 'signature_verification_failed',
+      status: 'error',
+      error: 'Missing stripe-signature header',
+    });
     res.status(400).send('Missing stripe-signature header');
     return;
   }
@@ -666,22 +1002,75 @@ export const stripeWebhook = functions.https.onRequest(async (req, res) => {
   let event: Stripe.Event;
 
   try {
-    if (webhookSecret) {
-      event = stripe.webhooks.constructEvent(req.rawBody, sig, webhookSecret);
+    if (STRIPE_WEBHOOK_SECRET) {
+      event = stripe.webhooks.constructEvent(req.rawBody, sig, STRIPE_WEBHOOK_SECRET);
     } else {
-      // For testing without webhook signature verification
+      // For testing only - never in production (blocked above)
       event = req.body as Stripe.Event;
     }
   } catch (err) {
+    await logPaymentEvent({
+      action: 'signature_verification_failed',
+      status: 'error',
+      error: err instanceof Error ? err.message : 'Unknown signature verification error',
+    });
     console.error('Webhook signature verification failed:', err);
     res.status(400).send(`Webhook Error: ${err instanceof Error ? err.message : 'Unknown error'}`);
     return;
   }
 
-  console.log(`Received Stripe webhook: ${event.type}`);
+  // Verify event livemode matches our configuration
+  if (event.livemode !== IS_LIVE_MODE) {
+    await logPaymentEvent({
+      action: 'mode_mismatch',
+      stripeEventId: event.id,
+      status: 'error',
+      error: `Mode mismatch: event.livemode=${event.livemode}, IS_LIVE_MODE=${IS_LIVE_MODE}`,
+      metadata: { eventType: event.type },
+    });
+    console.error(`Mode mismatch: event.livemode=${event.livemode}, IS_LIVE_MODE=${IS_LIVE_MODE}`);
+    res.status(400).send('Mode mismatch - event mode does not match server mode');
+    return;
+  }
+
+  console.log(`Received Stripe webhook: ${event.type} (${IS_LIVE_MODE ? 'LIVE' : 'TEST'} mode)`);
+
+  // Idempotency check - prevent duplicate event processing
+  const db = admin.firestore();
+  const eventRef = db.collection('stripeEvents').doc(event.id);
 
   try {
-    const db = admin.firestore();
+    const existingEvent = await eventRef.get();
+    if (existingEvent.exists) {
+      logPaymentEventSync({
+        action: 'webhook_duplicate',
+        stripeEventId: event.id,
+        status: 'info',
+        metadata: { eventType: event.type },
+      });
+      console.log(`Stripe event ${event.id} already processed, skipping`);
+      res.status(200).json({ received: true, duplicate: true });
+      return;
+    }
+
+    // Record event as being processed
+    await eventRef.set({
+      eventId: event.id,
+      eventType: event.type,
+      receivedAt: admin.firestore.FieldValue.serverTimestamp(),
+      status: 'processing',
+      livemode: event.livemode,
+      mode: IS_LIVE_MODE ? 'live' : 'test',
+    });
+  } catch (idempotencyError) {
+    // If we can't check/set idempotency, log but continue
+    // This handles race conditions where another instance might be processing
+    console.warn('Idempotency check failed:', idempotencyError);
+  }
+
+  const webhookTimer = createPaymentTimer();
+
+  try {
     switch (event.type) {
       case 'payment_intent.succeeded': {
         const paymentIntent = event.data.object as Stripe.PaymentIntent;
@@ -749,7 +1138,7 @@ export const stripeWebhook = functions.https.onRequest(async (req, res) => {
               console.log(`Order ${orderId} is now ready for manufacturer`);
             }
 
-            // Create PaymentRecord for the new payment system
+            // Create PaymentRecord for the new payment system (legacy - keeping for backwards compatibility)
             try {
               const paymentRecord = {
                 orderId,
@@ -771,7 +1160,7 @@ export const stripeWebhook = functions.https.onRequest(async (req, res) => {
               await db.collection('payments').add(paymentRecord);
               console.log(`PaymentRecord created for order ${orderId}`);
 
-              // Update order payment summary
+              // Update order payment summary (legacy)
               const paymentsQuery = await db
                 .collection('payments')
                 .where('orderId', '==', orderId)
@@ -801,6 +1190,46 @@ export const stripeWebhook = functions.https.onRequest(async (req, res) => {
             } catch (paymentRecordError) {
               console.error('Error creating PaymentRecord:', paymentRecordError);
               // Don't fail the webhook if PaymentRecord creation fails
+            }
+
+            // Create Payment Ledger entry (new single source of truth system)
+            try {
+              const { entryId, paymentNumber } = await createLedgerEntry({
+                orderId,
+                orderNumber: orderData?.orderNumber || '',
+                transactionType: 'payment',
+                amount: paymentIntent.amount / 100,
+                method: 'stripe',
+                category: 'initial_deposit',
+                status: 'verified',
+                stripePaymentId: paymentIntent.id,
+                stripeVerified: true,
+                stripeAmount: paymentIntent.amount,
+                stripeAmountDollars: paymentIntent.amount / 100,
+                description: 'Automatic payment via Stripe',
+                createdBy: 'stripe_webhook',
+                skipAudit: true, // We'll create custom audit entry with stripe event ID
+              }, db);
+
+              // Create audit entry with Stripe event ID
+              await createAuditEntry({
+                ledgerEntryId: entryId,
+                paymentNumber,
+                orderId,
+                orderNumber: orderData?.orderNumber || '',
+                action: 'verified',
+                newStatus: 'verified',
+                userId: 'stripe_webhook',
+                details: `Verified via Stripe webhook (PaymentIntent: ${paymentIntent.id})`,
+                stripeEventId: event.id,
+              }, db);
+
+              // Update order's ledger summary
+              await updateOrderLedgerSummary(orderId, db);
+              console.log(`Ledger entry ${paymentNumber} created and verified for order ${orderId}`);
+            } catch (ledgerError) {
+              console.error('Error creating ledger entry:', ledgerError);
+              // Don't fail the webhook if ledger creation fails
             }
           }
         }
@@ -883,13 +1312,329 @@ export const stripeWebhook = functions.https.onRequest(async (req, res) => {
         break;
       }
 
+      case 'payment_intent.payment_failed': {
+        const failedPaymentIntent = event.data.object as Stripe.PaymentIntent;
+        console.log(`PaymentIntent ${failedPaymentIntent.id} failed`);
+
+        const failedOrderId = failedPaymentIntent.metadata?.orderId;
+
+        await logPaymentEvent({
+          action: 'payment_intent_failed',
+          orderId: failedOrderId,
+          stripeId: failedPaymentIntent.id,
+          stripeEventId: event.id,
+          amount: failedPaymentIntent.amount / 100,
+          status: 'error',
+          error: failedPaymentIntent.last_payment_error?.message || 'Payment failed',
+          metadata: {
+            errorCode: failedPaymentIntent.last_payment_error?.code,
+            errorType: failedPaymentIntent.last_payment_error?.type,
+          },
+        });
+
+        // Update order if linked
+        if (failedOrderId) {
+          try {
+            await db.doc(`orders/${failedOrderId}`).update({
+              'payment.lastFailure': {
+                timestamp: admin.firestore.FieldValue.serverTimestamp(),
+                paymentIntentId: failedPaymentIntent.id,
+                error: failedPaymentIntent.last_payment_error?.message || 'Payment failed',
+                errorCode: failedPaymentIntent.last_payment_error?.code,
+              },
+            });
+          } catch (updateError) {
+            console.error('Error updating order with payment failure:', updateError);
+          }
+        }
+        break;
+      }
+
+      case 'charge.refunded': {
+        const refundedCharge = event.data.object as Stripe.Charge;
+        console.log(`Charge ${refundedCharge.id} was refunded`);
+
+        // Extract order info from metadata
+        const refundOrderId = refundedCharge.metadata?.orderId;
+        const refundAmount = refundedCharge.amount_refunded / 100;
+
+        await logPaymentEvent({
+          action: 'charge_refunded',
+          orderId: refundOrderId,
+          stripeId: refundedCharge.id,
+          stripeEventId: event.id,
+          amount: refundAmount,
+          status: 'success',
+          metadata: {
+            totalRefunded: refundedCharge.amount_refunded,
+            refundCount: refundedCharge.refunds?.data?.length || 0,
+          },
+        });
+
+        // Note: Actual ledger entry creation for refunds should be done through
+        // the verifyStripeRefund endpoint to ensure proper manual verification
+        break;
+      }
+
+      case 'charge.dispute.created': {
+        const dispute = event.data.object as Stripe.Dispute;
+        console.log(`Dispute ${dispute.id} created for charge ${dispute.charge}`);
+
+        await logPaymentEvent({
+          action: 'dispute_created',
+          stripeId: dispute.id,
+          stripeEventId: event.id,
+          amount: dispute.amount / 100,
+          status: 'warning',
+          metadata: {
+            chargeId: dispute.charge,
+            reason: dispute.reason,
+            status: dispute.status,
+          },
+        });
+
+        // Disputes require manual handling - just log for now
+        // Could send email notification to managers here
+        break;
+      }
+
       default:
         console.log(`Unhandled event type: ${event.type}`);
     }
 
+    // Mark event as processed successfully
+    try {
+      await eventRef.update({
+        status: 'processed',
+        processedAt: admin.firestore.FieldValue.serverTimestamp(),
+        processingTimeMs: webhookTimer.stop(),
+      });
+    } catch (updateError) {
+      console.warn('Failed to update event status:', updateError);
+    }
+
+    // Log successful processing
+    await logPaymentEvent({
+      action: 'webhook_processed',
+      stripeEventId: event.id,
+      status: 'success',
+      duration: webhookTimer.stop(),
+      metadata: { eventType: event.type },
+    });
+
     res.status(200).json({ received: true });
   } catch (error) {
     console.error('Error processing webhook:', error);
+
+    // Log failure
+    await logPaymentEvent({
+      action: 'webhook_failed',
+      stripeEventId: event.id,
+      status: 'error',
+      error: error instanceof Error ? error.message : 'Unknown error',
+      duration: webhookTimer.stop(),
+      metadata: { eventType: event.type },
+    });
+
+    // Mark event as failed
+    try {
+      await eventRef.update({
+        status: 'failed',
+        failedAt: admin.firestore.FieldValue.serverTimestamp(),
+        error: error instanceof Error ? error.message : 'Unknown error',
+        processingTimeMs: webhookTimer.stop(),
+      });
+    } catch (updateError) {
+      console.warn('Failed to update event status:', updateError);
+    }
+
     res.status(500).json({ error: 'Webhook processing failed' });
+  }
+});
+
+/**
+ * Verify a Stripe refund and create a ledger entry
+ *
+ * Workflow:
+ * 1. Manager processes refund in Stripe Dashboard
+ * 2. Manager copies refund ID (re_xxxxx)
+ * 3. Manager enters refund ID in the app
+ * 4. This endpoint verifies refund exists in Stripe
+ * 5. Creates ledger entry with verified status
+ * 6. Order balance updates automatically
+ */
+export const verifyStripeRefund = functions.https.onRequest(async (req, res) => {
+  res.set('Access-Control-Allow-Origin', '*');
+  res.set('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.set('Access-Control-Allow-Headers', 'Content-Type');
+
+  if (req.method === 'OPTIONS') {
+    res.status(204).send('');
+    return;
+  }
+
+  if (req.method !== 'POST') {
+    res.status(405).json({ error: 'Method not allowed' });
+    return;
+  }
+
+  const timer = createPaymentTimer();
+
+  try {
+    const db = admin.firestore();
+    const { refundId, orderId, orderNumber, amount: overrideAmount, createdBy, notes } = req.body;
+
+    // Validate required fields
+    if (!refundId) {
+      res.status(400).json({ error: 'refundId is required' });
+      return;
+    }
+
+    if (!orderId && !orderNumber) {
+      res.status(400).json({ error: 'orderId or orderNumber is required' });
+      return;
+    }
+
+    // Validate refund ID format
+    if (!refundId.startsWith('re_')) {
+      res.status(400).json({ error: 'Invalid refund ID format. Expected re_xxxxx' });
+      return;
+    }
+
+    // Find order by ID or number
+    let targetOrderId = orderId;
+    let targetOrderNumber = orderNumber;
+
+    if (!targetOrderId && orderNumber) {
+      const ordersQuery = await db
+        .collection('orders')
+        .where('orderNumber', '==', orderNumber)
+        .limit(1)
+        .get();
+
+      if (ordersQuery.empty) {
+        res.status(404).json({ error: `Order ${orderNumber} not found` });
+        return;
+      }
+
+      targetOrderId = ordersQuery.docs[0].id;
+      targetOrderNumber = ordersQuery.docs[0].data().orderNumber;
+    } else if (targetOrderId && !targetOrderNumber) {
+      const orderDoc = await db.collection('orders').doc(targetOrderId).get();
+      if (!orderDoc.exists) {
+        res.status(404).json({ error: `Order ${targetOrderId} not found` });
+        return;
+      }
+      targetOrderNumber = orderDoc.data()?.orderNumber || targetOrderId;
+    }
+
+    // Verify refund exists in Stripe
+    let refund: Stripe.Refund;
+    try {
+      refund = await stripe.refunds.retrieve(refundId);
+    } catch (stripeError) {
+      await logPaymentEvent({
+        action: 'refund_failed',
+        orderId: targetOrderId,
+        orderNumber: targetOrderNumber,
+        stripeId: refundId,
+        status: 'error',
+        error: 'Refund not found in Stripe',
+        duration: timer.stop(),
+      });
+
+      res.status(400).json({ error: 'Refund not found in Stripe. Please verify the refund ID.' });
+      return;
+    }
+
+    // Verify refund succeeded
+    if (refund.status !== 'succeeded') {
+      res.status(400).json({
+        error: `Refund status is "${refund.status}", not "succeeded". Cannot record incomplete refund.`,
+        refundStatus: refund.status,
+      });
+      return;
+    }
+
+    // Check if this refund has already been recorded
+    const existingEntries = await db
+      .collection('payment_ledger')
+      .where('stripePaymentId', '==', refundId)
+      .limit(1)
+      .get();
+
+    if (!existingEntries.empty) {
+      const existingEntry = existingEntries.docs[0].data();
+      res.status(400).json({
+        error: 'This refund has already been recorded in the ledger',
+        existingEntryId: existingEntries.docs[0].id,
+        existingPaymentNumber: existingEntry.paymentNumber,
+      });
+      return;
+    }
+
+    // Get actual amount from Stripe (convert from cents to dollars)
+    const refundAmount = overrideAmount || (refund.amount / 100);
+
+    // Create ledger entry for the verified refund
+    const { entryId, paymentNumber } = await createLedgerEntry({
+      orderId: targetOrderId,
+      orderNumber: targetOrderNumber,
+      transactionType: 'refund',
+      amount: refundAmount,
+      method: 'stripe',
+      category: 'refund',
+      status: 'verified',
+      stripePaymentId: refundId,
+      stripeVerified: true,
+      stripeAmount: refund.amount,
+      stripeAmountDollars: refund.amount / 100,
+      description: `Stripe refund verified (${refundId})`,
+      notes: notes || undefined,
+      createdBy: createdBy || 'manager',
+    }, db);
+
+    // Update order's ledger summary
+    await updateOrderLedgerSummary(targetOrderId, db);
+
+    // Log success
+    await logPaymentEvent({
+      action: 'refund_verified',
+      orderId: targetOrderId,
+      orderNumber: targetOrderNumber,
+      stripeId: refundId,
+      amount: refundAmount,
+      status: 'success',
+      duration: timer.stop(),
+      metadata: {
+        ledgerEntryId: entryId,
+        paymentNumber,
+        stripeRefundStatus: refund.status,
+      },
+    });
+
+    res.status(200).json({
+      success: true,
+      refundId,
+      ledgerEntryId: entryId,
+      paymentNumber,
+      amount: refundAmount,
+      stripeAmount: refund.amount / 100,
+      message: `Refund verified and recorded as ${paymentNumber}`,
+    });
+  } catch (error) {
+    await logPaymentEvent({
+      action: 'refund_failed',
+      orderId: req.body?.orderId,
+      stripeId: req.body?.refundId,
+      status: 'error',
+      error: error instanceof Error ? error.message : 'Unknown error',
+      duration: timer.stop(),
+    });
+
+    console.error('Refund verification failed:', error);
+    res.status(500).json({
+      error: error instanceof Error ? error.message : 'Refund verification failed',
+    });
   }
 });

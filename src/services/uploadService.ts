@@ -1,5 +1,5 @@
 import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
-import { collection, addDoc, serverTimestamp, doc, getDoc, setDoc } from 'firebase/firestore';
+import { collection, addDoc, serverTimestamp, doc } from 'firebase/firestore';
 import { storage, db } from '../config/firebase';
 
 export interface SignerInfo {
@@ -14,21 +14,48 @@ export interface UploadResult {
   orderNumber: string;
 }
 
-// Generate sequential order number
+// Generate sequential order number with uniqueness check
+// Uses same counter as orderService.ts to prevent duplicates
 async function generateOrderNumber(): Promise<string> {
-  const counterRef = doc(db, 'counters', 'orders');
-  const counterSnap = await getDoc(counterRef);
+  const { runTransaction, query, where, getDocs, limit, collection: firestoreCollection } = await import('firebase/firestore');
+  const counterRef = doc(db, 'counters', 'order_number');
 
-  let nextNumber = 1;
-  if (counterSnap.exists()) {
-    nextNumber = (counterSnap.data().current || 0) + 1;
+  let orderNumber = '';
+  let attempts = 0;
+  const maxAttempts = 10;
+
+  while (attempts < maxAttempts) {
+    attempts++;
+
+    // Get next number atomically using transaction
+    const nextNumber = await runTransaction(db, async (transaction) => {
+      const counterSnap = await transaction.get(counterRef);
+      let current = 0;
+      if (counterSnap.exists()) {
+        current = counterSnap.data().current || 0;
+      }
+      const next = current + 1;
+      transaction.set(counterRef, { current: next });
+      return next;
+    });
+
+    orderNumber = `ORD-${String(nextNumber).padStart(5, '0')}`;
+
+    // Verify uniqueness - check if order number already exists
+    const ordersRef = firestoreCollection(db, 'orders');
+    const existingQuery = query(ordersRef, where('orderNumber', '==', orderNumber), limit(1));
+    const existingSnap = await getDocs(existingQuery);
+
+    if (existingSnap.empty) {
+      // Order number is unique, we can use it
+      return orderNumber;
+    }
+
+    // If duplicate found, loop will try again with next number
+    console.warn(`Order number ${orderNumber} already exists, trying next...`);
   }
 
-  // Update counter
-  await setDoc(counterRef, { current: nextNumber });
-
-  // Format: ORD-00001
-  return `ORD-${String(nextNumber).padStart(5, '0')}`;
+  throw new Error(`Failed to generate unique order number after ${maxAttempts} attempts`);
 }
 
 export async function uploadDocument(

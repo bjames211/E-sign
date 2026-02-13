@@ -3,10 +3,10 @@ dotenv.config();
 
 import * as functions from 'firebase-functions/v1';
 import * as admin from 'firebase-admin';
-import { sendForSignature, downloadSignedDocument, cancelSigningInvite } from './signNowService';
+import { sendForSignature, downloadSignedDocument, cancelSigningInvite, resendSigningInvite, sendSignatureReminder } from './signNowService';
 import { extractDataFromPdf } from './pdfExtractor';
 import { addDocumentToSheet, updateSheetOnSigned } from './googleSheetsService';
-import { seedAdminOptions, seedMockQuotes, seedBulkQuotes } from './seedData';
+import { seedAdminOptions, seedMockQuotes, seedBulkQuotes, seedTestOrders, seedPartialPaymentOrders, seedOverpaidOrders } from './seedData';
 import {
   createPaymentIntent,
   verifyPayment,
@@ -14,6 +14,8 @@ import {
   stripeWebhook,
   verifyPaymentForOrder,
   approveManualPayment,
+  generatePaymentLinkForUnderpaid,
+  verifyStripeRefund,
 } from './stripeFunctions';
 import {
   addPaymentRecord,
@@ -25,6 +27,45 @@ import {
   chargeCardOnFile,
 } from './paymentFunctions';
 import { sendOrderForSignature, updateOrderOnSigned, migrateOrderPaymentStatus, syncOrderStatusFromEsign, sendChangeOrderForSignature, testSignOrder, testSignChangeOrder } from './orderEsignBridge';
+import {
+  addLedgerEntry,
+  voidLedgerEntry,
+  approveLedgerEntry,
+  approveLegacyPayment,
+  getLedgerEntries,
+  getPendingLedgerEntries,
+  recalculateLedgerSummary,
+  auditOrder,
+  getAllLedgerEntries,
+  migratePaymentNumbers,
+  migrateBalanceAfter,
+  fixDuplicateOrderNumber,
+  syncOrderNumberCounter,
+} from './paymentLedgerFunctions';
+import {
+  getAuditHistoryForPayment,
+  getAuditHistoryForOrder,
+  backfillAuditEntries,
+} from './paymentAuditFunctions';
+import { migrateToPaymentLedger, migrateOrderToLedger, clearAndRemigrateLedger, forceMigrateLegacyPayments } from './migrateToLedger';
+import { reconcileLedgerWithStripe, findMissingLedgerEntries, fixLedgerEntryAmount } from './stripeReconciliation';
+import {
+  recordPrepaidPayment,
+  applyPrepaidCreditToOrder,
+  getUnappliedCredits,
+  voidPrepaidCredit,
+  findMatchingCredits,
+} from './prepaidCreditFunctions';
+import {
+  processRefund,
+  getRefundableAmount,
+  findOverpaidOrders,
+} from './refundFunctions';
+import {
+  dailyReconciliation,
+  triggerReconciliation,
+  getLatestReconciliationReport,
+} from './scheduledFunctions';
 
 admin.initializeApp();
 
@@ -36,6 +77,8 @@ export {
   stripeWebhook,
   verifyPaymentForOrder,
   approveManualPayment,
+  generatePaymentLinkForUnderpaid,
+  verifyStripeRefund,
 };
 
 // Export Order-to-ESign bridge functions
@@ -50,6 +93,68 @@ export {
   getPaymentsForOrder,
   recalculatePaymentSummary,
   chargeCardOnFile,
+};
+
+// Export Payment Ledger functions
+export {
+  addLedgerEntry,
+  voidLedgerEntry,
+  approveLedgerEntry,
+  approveLegacyPayment,
+  getLedgerEntries,
+  getPendingLedgerEntries,
+  recalculateLedgerSummary,
+  auditOrder,
+  getAllLedgerEntries,
+  migratePaymentNumbers,
+  migrateBalanceAfter,
+  fixDuplicateOrderNumber,
+  syncOrderNumberCounter,
+};
+
+// Export Payment Audit functions
+export {
+  getAuditHistoryForPayment,
+  getAuditHistoryForOrder,
+  backfillAuditEntries,
+};
+
+// Export Migration functions
+export {
+  migrateToPaymentLedger,
+  migrateOrderToLedger,
+  clearAndRemigrateLedger,
+  forceMigrateLegacyPayments,
+};
+
+// Export Stripe Reconciliation functions
+export {
+  reconcileLedgerWithStripe,
+  findMissingLedgerEntries,
+  fixLedgerEntryAmount,
+};
+
+// Export Prepaid Credit functions
+export {
+  recordPrepaidPayment,
+  applyPrepaidCreditToOrder,
+  getUnappliedCredits,
+  voidPrepaidCredit,
+  findMatchingCredits,
+};
+
+// Export Refund functions
+export {
+  processRefund,
+  getRefundableAmount,
+  findOverpaidOrders,
+};
+
+// Export Scheduled functions
+export {
+  dailyReconciliation,
+  triggerReconciliation,
+  getLatestReconciliationReport,
 };
 
 /**
@@ -245,6 +350,235 @@ export const cancelSignature = functions.https.onRequest(async (req, res) => {
   } catch (error: any) {
     console.error('Error cancelling signature:', error);
     res.status(500).json({ error: error.message || 'Failed to cancel signature' });
+  }
+});
+
+/**
+ * HTTP endpoint to resend a signature invite
+ * Sends another email to the signer for an existing pending signature
+ */
+export const resendSignature = functions.https.onRequest(async (req, res) => {
+  res.set('Access-Control-Allow-Origin', '*');
+  res.set('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.set('Access-Control-Allow-Headers', 'Content-Type');
+
+  if (req.method === 'OPTIONS') {
+    res.status(204).send('');
+    return;
+  }
+
+  if (req.method !== 'POST') {
+    res.status(405).json({ error: 'Method not allowed' });
+    return;
+  }
+
+  const { orderId, orderNumber } = req.body;
+
+  if (!orderId && !orderNumber) {
+    res.status(400).json({ error: 'orderId or orderNumber is required' });
+    return;
+  }
+
+  try {
+    const db = admin.firestore();
+
+    // Find the order
+    let orderData: FirebaseFirestore.DocumentData;
+
+    if (orderId) {
+      const orderDoc = await db.collection('orders').doc(orderId).get();
+      if (!orderDoc.exists) {
+        res.status(404).json({ error: `Order ${orderId} not found` });
+        return;
+      }
+      orderData = orderDoc.data()!;
+    } else {
+      const ordersQuery = await db
+        .collection('orders')
+        .where('orderNumber', '==', orderNumber)
+        .limit(1)
+        .get();
+
+      if (ordersQuery.empty) {
+        res.status(404).json({ error: `Order ${orderNumber} not found` });
+        return;
+      }
+      orderData = ordersQuery.docs[0].data();
+    }
+
+    // Check if order is awaiting signature
+    if (orderData.status !== 'sent_for_signature') {
+      res.status(400).json({
+        error: `Order is not awaiting signature - current status is "${orderData.status}".`
+      });
+      return;
+    }
+
+    // Find the esign document
+    const esignDocId = orderData.esignDocumentId;
+    if (!esignDocId) {
+      res.status(400).json({ error: 'No esign document linked to this order' });
+      return;
+    }
+
+    const esignDocRef = db.collection('esign_documents').doc(esignDocId);
+    const esignDoc = await esignDocRef.get();
+
+    if (!esignDoc.exists) {
+      res.status(404).json({ error: 'Esign document not found' });
+      return;
+    }
+
+    const esignData = esignDoc.data()!;
+    const signNowDocumentId = esignData.signNowDocumentId;
+
+    if (!signNowDocumentId) {
+      res.status(400).json({ error: 'No SignNow document ID found' });
+      return;
+    }
+
+    // Resend the invite
+    const result = await resendSigningInvite(signNowDocumentId);
+
+    if (!result.success) {
+      res.status(400).json({ error: result.message });
+      return;
+    }
+
+    // Log the resend action
+    await esignDocRef.update({
+      lastReminderSentAt: admin.firestore.FieldValue.serverTimestamp(),
+      reminderCount: admin.firestore.FieldValue.increment(1),
+    });
+
+    res.json({
+      success: true,
+      message: `Signature request resent for order ${orderData.orderNumber}`,
+    });
+  } catch (error: any) {
+    console.error('Error resending signature:', error);
+    res.status(500).json({ error: error.message || 'Failed to resend signature' });
+  }
+});
+
+/**
+ * HTTP endpoint to send a reminder email for signature
+ * Sends a custom reminder email to the signer
+ */
+export const sendReminder = functions.https.onRequest(async (req, res) => {
+  res.set('Access-Control-Allow-Origin', '*');
+  res.set('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.set('Access-Control-Allow-Headers', 'Content-Type');
+
+  if (req.method === 'OPTIONS') {
+    res.status(204).send('');
+    return;
+  }
+
+  if (req.method !== 'POST') {
+    res.status(405).json({ error: 'Method not allowed' });
+    return;
+  }
+
+  const { orderId, orderNumber, customMessage } = req.body;
+
+  if (!orderId && !orderNumber) {
+    res.status(400).json({ error: 'orderId or orderNumber is required' });
+    return;
+  }
+
+  try {
+    const db = admin.firestore();
+
+    // Find the order
+    let orderData: FirebaseFirestore.DocumentData;
+    let resolvedOrderId: string;
+
+    if (orderId) {
+      resolvedOrderId = orderId;
+      const orderDoc = await db.collection('orders').doc(orderId).get();
+      if (!orderDoc.exists) {
+        res.status(404).json({ error: `Order ${orderId} not found` });
+        return;
+      }
+      orderData = orderDoc.data()!;
+    } else {
+      const ordersQuery = await db
+        .collection('orders')
+        .where('orderNumber', '==', orderNumber)
+        .limit(1)
+        .get();
+
+      if (ordersQuery.empty) {
+        res.status(404).json({ error: `Order ${orderNumber} not found` });
+        return;
+      }
+      resolvedOrderId = ordersQuery.docs[0].id;
+      orderData = ordersQuery.docs[0].data();
+    }
+
+    // Check if order is awaiting signature
+    if (orderData.status !== 'sent_for_signature') {
+      res.status(400).json({
+        error: `Order is not awaiting signature - current status is "${orderData.status}".`
+      });
+      return;
+    }
+
+    // Find the esign document
+    const esignDocId = orderData.esignDocumentId;
+    if (!esignDocId) {
+      res.status(400).json({ error: 'No esign document linked to this order' });
+      return;
+    }
+
+    const esignDocRef = db.collection('esign_documents').doc(esignDocId);
+    const esignDoc = await esignDocRef.get();
+
+    if (!esignDoc.exists) {
+      res.status(404).json({ error: 'Esign document not found' });
+      return;
+    }
+
+    const esignData = esignDoc.data()!;
+    const signNowDocumentId = esignData.signNowDocumentId;
+
+    if (!signNowDocumentId) {
+      res.status(400).json({ error: 'No SignNow document ID found' });
+      return;
+    }
+
+    // Send the reminder
+    const result = await sendSignatureReminder(signNowDocumentId, customMessage);
+
+    if (!result.success) {
+      res.status(400).json({ error: result.message });
+      return;
+    }
+
+    // Log the reminder action
+    await esignDocRef.update({
+      lastReminderSentAt: admin.firestore.FieldValue.serverTimestamp(),
+      reminderCount: admin.firestore.FieldValue.increment(1),
+    });
+
+    // Also log in order interaction history
+    await db.collection('order_interactions').add({
+      orderId: resolvedOrderId,
+      orderNumber: orderData.orderNumber,
+      type: 'reminder_sent',
+      description: 'Signature reminder email sent',
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      createdBy: 'system',
+    });
+
+    res.json({
+      success: true,
+      message: `Reminder sent for order ${orderData.orderNumber}`,
+    });
+  } catch (error: any) {
+    console.error('Error sending reminder:', error);
+    res.status(500).json({ error: error.message || 'Failed to send reminder' });
   }
 });
 
@@ -654,12 +988,274 @@ export const seedInitialData = functions.https.onRequest(async (req, res) => {
       return;
     }
 
+    if (seedType === 'test_orders') {
+      const numOrders = count || 10;
+      const result = await seedTestOrders(numOrders);
+      res.status(200).json({
+        success: true,
+        message: `Created ${result.created} test orders with various payment scenarios`,
+        count: result.created,
+        orders: result.orders,
+      });
+      return;
+    }
+
+    if (seedType === 'partial_payment_orders') {
+      const result = await seedPartialPaymentOrders();
+      res.status(200).json({
+        success: true,
+        message: `Created ${result.created} partial payment test orders with different payment methods`,
+        count: result.created,
+        orders: result.orders,
+      });
+      return;
+    }
+
+    if (seedType === 'overpaid_orders') {
+      const result = await seedOverpaidOrders();
+      res.status(200).json({
+        success: true,
+        message: `Created ${result.created} OVERPAID orders (refund due) with different payment methods`,
+        count: result.created,
+        orders: result.orders,
+      });
+      return;
+    }
+
     res.status(200).json({
       success: true,
       message: `Seed completed for: ${seedType || 'all'}`,
     });
   } catch (error) {
     console.error('Seed error:', error);
+    res.status(500).json({ error: error instanceof Error ? error.message : 'Unknown error' });
+  }
+});
+
+/**
+ * Admin endpoint to delete test orders
+ * Usage: POST /deleteTestOrders { orderNumbers: ['ORD-00028', 'ORD-00029', ...] }
+ */
+export const deleteTestOrders = functions.https.onRequest(async (req, res) => {
+  res.set('Access-Control-Allow-Origin', '*');
+  res.set('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.set('Access-Control-Allow-Headers', 'Content-Type');
+
+  if (req.method === 'OPTIONS') {
+    res.status(204).send('');
+    return;
+  }
+
+  try {
+    const { orderNumbers } = req.body;
+
+    if (!orderNumbers || !Array.isArray(orderNumbers)) {
+      res.status(400).json({ error: 'orderNumbers array is required' });
+      return;
+    }
+
+    const db = admin.firestore();
+    const deleted: string[] = [];
+    const errors: string[] = [];
+
+    for (const orderNumber of orderNumbers) {
+      try {
+        // Find order by orderNumber where createdBy is 'test-script'
+        const ordersSnap = await db.collection('orders')
+          .where('orderNumber', '==', orderNumber)
+          .where('createdBy', '==', 'test-script')
+          .get();
+
+        if (ordersSnap.empty) {
+          console.log(`No test order found for ${orderNumber}`);
+          continue;
+        }
+
+        for (const orderDoc of ordersSnap.docs) {
+          const orderId = orderDoc.id;
+          console.log(`Deleting ${orderNumber} (${orderId})...`);
+
+          // Delete ledger entries
+          const ledgerSnap = await db.collection('payment_ledger')
+            .where('orderId', '==', orderId)
+            .get();
+
+          for (const ledgerDoc of ledgerSnap.docs) {
+            await ledgerDoc.ref.delete();
+          }
+
+          // Delete ledger summary
+          const summaryRef = db.collection('ledger_summaries').doc(orderId);
+          const summaryDoc = await summaryRef.get();
+          if (summaryDoc.exists) {
+            await summaryRef.delete();
+          }
+
+          // Delete the order
+          await orderDoc.ref.delete();
+          deleted.push(orderNumber);
+        }
+      } catch (err) {
+        console.error(`Error deleting ${orderNumber}:`, err);
+        errors.push(`${orderNumber}: ${err}`);
+      }
+    }
+
+    res.status(200).json({
+      success: true,
+      deleted,
+      errors,
+      message: `Deleted ${deleted.length} test orders`,
+    });
+  } catch (error) {
+    console.error('Delete error:', error);
+    res.status(500).json({ error: error instanceof Error ? error.message : 'Unknown error' });
+  }
+});
+
+/**
+ * Admin endpoint to fix change order status
+ * Usage: POST /fixChangeOrderStatus { changeOrderId, newStatus }
+ */
+export const fixChangeOrderStatus = functions.https.onRequest(async (req, res) => {
+  res.set('Access-Control-Allow-Origin', '*');
+  res.set('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.set('Access-Control-Allow-Headers', 'Content-Type');
+
+  if (req.method === 'OPTIONS') {
+    res.status(204).send('');
+    return;
+  }
+
+  if (req.method !== 'POST') {
+    res.status(405).json({ error: 'Method not allowed' });
+    return;
+  }
+
+  try {
+    const { changeOrderId, newStatus } = req.body;
+
+    if (!changeOrderId || !newStatus) {
+      res.status(400).json({ error: 'changeOrderId and newStatus are required' });
+      return;
+    }
+
+    const validStatuses = ['draft', 'pending_signature', 'signed', 'cancelled', 'superseded'];
+    if (!validStatuses.includes(newStatus)) {
+      res.status(400).json({ error: `Invalid status. Valid statuses: ${validStatuses.join(', ')}` });
+      return;
+    }
+
+    const db = admin.firestore();
+    const coRef = db.collection('change_orders').doc(changeOrderId);
+    const coDoc = await coRef.get();
+
+    if (!coDoc.exists) {
+      res.status(404).json({ error: 'Change order not found' });
+      return;
+    }
+
+    const previousStatus = coDoc.data()?.status;
+    await coRef.update({
+      status: newStatus,
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+    res.status(200).json({
+      success: true,
+      changeOrderId,
+      previousStatus,
+      newStatus,
+      message: `Change order status updated from ${previousStatus} to ${newStatus}`,
+    });
+  } catch (error) {
+    console.error('Fix CO status error:', error);
+    res.status(500).json({ error: error instanceof Error ? error.message : 'Unknown error' });
+  }
+});
+
+/**
+ * Admin endpoint to set user role
+ * Usage: POST /setUserRole { email, role }
+ * Roles: 'admin', 'manager', 'sales_rep'
+ */
+export const setUserRole = functions.https.onRequest(async (req, res) => {
+  res.set('Access-Control-Allow-Origin', '*');
+  res.set('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.set('Access-Control-Allow-Headers', 'Content-Type');
+
+  if (req.method === 'OPTIONS') {
+    res.status(204).send('');
+    return;
+  }
+
+  if (req.method !== 'POST') {
+    res.status(405).json({ error: 'Method not allowed' });
+    return;
+  }
+
+  try {
+    const { email, role } = req.body;
+
+    if (!email || !role) {
+      res.status(400).json({ error: 'email and role are required' });
+      return;
+    }
+
+    const validRoles = ['admin', 'manager', 'sales_rep'];
+    if (!validRoles.includes(role)) {
+      res.status(400).json({ error: `Invalid role. Valid roles: ${validRoles.join(', ')}` });
+      return;
+    }
+
+    const db = admin.firestore();
+    await db.collection('user_roles').doc(email).set({
+      email,
+      role,
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+    res.status(200).json({
+      success: true,
+      email,
+      role,
+      message: `User ${email} set to ${role}`,
+    });
+  } catch (error) {
+    console.error('Set user role error:', error);
+    res.status(500).json({ error: error instanceof Error ? error.message : 'Unknown error' });
+  }
+});
+
+/**
+ * Get all user roles
+ * Usage: GET /getUserRoles
+ */
+export const getUserRoles = functions.https.onRequest(async (req, res) => {
+  res.set('Access-Control-Allow-Origin', '*');
+  res.set('Access-Control-Allow-Methods', 'GET, OPTIONS');
+  res.set('Access-Control-Allow-Headers', 'Content-Type');
+
+  if (req.method === 'OPTIONS') {
+    res.status(204).send('');
+    return;
+  }
+
+  try {
+    const db = admin.firestore();
+    const snapshot = await db.collection('user_roles').get();
+
+    const roles: any[] = [];
+    snapshot.forEach((doc) => {
+      roles.push({ id: doc.id, ...doc.data() });
+    });
+
+    res.status(200).json({
+      success: true,
+      roles,
+    });
+  } catch (error) {
+    console.error('Get user roles error:', error);
     res.status(500).json({ error: error instanceof Error ? error.message : 'Unknown error' });
   }
 });

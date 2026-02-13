@@ -6,6 +6,12 @@ interface OrderCardProps {
   order: Order;
   onClick: () => void;
   onApprovePayment?: (orderId: string) => void;
+  // Effective values from live change order (pending_signature)
+  effectiveCOValues?: {
+    deposit: number;
+    total: number;
+    changeOrderNumber?: string;
+  };
 }
 
 // Signature status styles
@@ -58,9 +64,9 @@ function formatDate(timestamp: Timestamp | any | undefined): string {
   }
 }
 
-export function OrderCard({ order, onClick, onApprovePayment }: OrderCardProps) {
-  const statusStyle = STATUS_STYLES[order.status];
-  const customerName = `${order.customer.firstName} ${order.customer.lastName}`.trim();
+export function OrderCard({ order, onClick, onApprovePayment, effectiveCOValues }: OrderCardProps) {
+  const statusStyle = STATUS_STYLES[order.status] || STATUS_STYLES.draft;
+  const customerName = `${order.customer?.firstName || ''} ${order.customer?.lastName || ''}`.trim() || 'Unknown';
 
   // Get signature status
   const signatureStatus = SIGNATURE_STATUS_STYLES[order.status] || SIGNATURE_STATUS_STYLES.draft;
@@ -78,46 +84,65 @@ export function OrderCard({ order, onClick, onApprovePayment }: OrderCardProps) 
   // Format payment type for display
   const paymentTypeLabel = order.payment?.type?.replace(/_/g, ' ') || 'Unknown';
 
-  // Calculate balance for display
-  // order.pricing.deposit is already updated when change orders are signed
-  const depositRequired = order.pricing?.deposit || 0;
-  const originalDeposit = order.originalPricing?.deposit || depositRequired;
+  // Check if there's a live CO with effective values
+  const hasLiveCO = !!effectiveCOValues;
 
-  let balanceDue = 0;
+  // Use ledger summary if available (new single source of truth)
+  // Otherwise fall back to legacy calculation for backward compatibility
+  const ledgerSummary = order.ledgerSummary;
+
+  let depositRequired = 0;
   let totalPaid = 0;
+  let balanceDue = 0;
 
-  // Check if customer has paid their initial deposit
-  const hasPaidInitialDeposit = paymentStatus === 'paid' || paymentStatus === 'manually_approved';
+  if (ledgerSummary) {
+    // Use ledger summary as base, but override with CO values if present
+    totalPaid = ledgerSummary.netReceived;
 
-  // Get payment summary total (may only have adjustments/refunds, not original payment)
-  const summaryTotal = order.paymentSummary?.totalPaid ?? 0;
-
-  if (hasPaidInitialDeposit) {
-    // Customer paid their deposit
-    if (summaryTotal <= 0) {
-      // Summary only has refunds (original Stripe payment not in payments collection)
-      // Net paid = original deposit + refunds (refunds are negative)
-      totalPaid = originalDeposit + summaryTotal;
-    } else if (summaryTotal < originalDeposit) {
-      // Summary has some payments but less than original - likely adjustments only
-      totalPaid = originalDeposit + summaryTotal;
+    if (hasLiveCO) {
+      // Live CO overrides deposit required
+      depositRequired = effectiveCOValues.deposit;
+      balanceDue = depositRequired - totalPaid;
     } else {
-      // Summary includes the full payment history
-      totalPaid = summaryTotal;
+      depositRequired = ledgerSummary.depositRequired;
+      balanceDue = ledgerSummary.balance;
     }
   } else {
-    // Not marked as paid - just use summary
-    totalPaid = summaryTotal;
-  }
+    // Legacy calculation (for orders not yet migrated to ledger)
+    depositRequired = order.pricing?.deposit || 0;
+    const originalDeposit = order.originalPricing?.deposit || depositRequired;
 
-  // Add test payment amount if in test mode
-  if (order.isTestMode && order.testPaymentAmount !== undefined && order.testPaymentAmount > 0) {
-    totalPaid += order.testPaymentAmount;
-  }
+    // Check if customer has paid their initial deposit
+    const hasPaidInitialDeposit = paymentStatus === 'paid' || paymentStatus === 'manually_approved';
 
-  // Calculate balance: required minus paid
-  // Positive = still owed, Negative = overpaid/refund due
-  balanceDue = depositRequired - totalPaid;
+    // Get payment summary total (may only have adjustments/refunds, not original payment)
+    const summaryTotal = order.paymentSummary?.totalPaid ?? 0;
+
+    if (hasPaidInitialDeposit) {
+      // Customer paid their deposit
+      if (summaryTotal <= 0) {
+        // Summary only has refunds (original Stripe payment not in payments collection)
+        totalPaid = originalDeposit + summaryTotal;
+      } else if (summaryTotal < originalDeposit) {
+        // Summary has some payments but less than original - likely adjustments only
+        totalPaid = originalDeposit + summaryTotal;
+      } else {
+        // Summary includes the full payment history
+        totalPaid = summaryTotal;
+      }
+    } else {
+      // Not marked as paid - just use summary
+      totalPaid = summaryTotal;
+    }
+
+    // Add test payment amount if in test mode
+    if (order.isTestMode && order.testPaymentAmount !== undefined && order.testPaymentAmount > 0) {
+      totalPaid += order.testPaymentAmount;
+    }
+
+    // Calculate balance: required minus paid
+    balanceDue = depositRequired - totalPaid;
+  }
 
   const hasBalance = balanceDue !== 0;
 
@@ -310,8 +335,13 @@ export function OrderCard({ order, onClick, onApprovePayment }: OrderCardProps) 
         <div style={styles.pricing}>
           <span style={styles.priceLabel}>Total:</span>
           <span style={styles.priceValue}>
-            ${(order.pricing.subtotalBeforeTax + order.pricing.extraMoneyFluff).toLocaleString()}
+            ${(hasLiveCO ? effectiveCOValues.total : (order.pricing.subtotalBeforeTax + order.pricing.extraMoneyFluff)).toLocaleString()}
           </span>
+          {hasLiveCO && (
+            <span style={styles.oldTotal}>
+              (was ${(order.pricing.subtotalBeforeTax + order.pricing.extraMoneyFluff).toLocaleString()})
+            </span>
+          )}
         </div>
         <div style={styles.date}>
           Created: {formatDate(order.createdAt)}
@@ -435,6 +465,12 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: '18px',
     fontWeight: 600,
     color: '#2e7d32',
+  },
+  oldTotal: {
+    fontSize: '11px',
+    color: '#999',
+    marginLeft: '6px',
+    textDecoration: 'line-through',
   },
   date: {
     fontSize: '12px',

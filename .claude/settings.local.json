@@ -44,7 +44,23 @@
       "Bash(find:*)",
       "Bash(tree:*)",
       "Bash(npx tsc:*)",
-      "Bash(npx firebase deploy:*)"
+      "Bash(npx firebase deploy:*)",
+      "Bash(python3:*)",
+      "WebFetch(domain:e-sign-27f9a.web.app)",
+      "Bash(gcloud firestore documents list:*)",
+      "Bash(echo 'No json files found' ls -la /Users/design/Desktop/esign-automation/*.json)",
+      "Bash(firebase use:*)",
+      "Bash(firebase projects:list:*)",
+      "Bash(for i in 32 33 34 35 36 37 38 39 40 41)",
+      "Bash(do echo -n \"ORD-000$i: \" curl -s \"https://us-central1-e-sign-27f9a.cloudfunctions.net/auditOrder?orderNumber=ORD-000$i\")",
+      "Bash(firebase firestore:indexes:*)",
+      "Bash(jq:*)",
+      "Bash(npx firebase login:*)",
+      "Bash(lsof:*)",
+      "Bash(GOOGLE_CLOUD_PROJECT=e-sign-27f9a GCLOUD_PROJECT=e-sign-27f9a node:*)",
+      "Bash(open \"https://e-sign-27f9a.web.app/\")",
+      "Bash(firebase login:list:*)",
+      "Bash(firebase logout:*)"
     ]
   }
 }

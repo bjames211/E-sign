@@ -152,8 +152,21 @@ export function AddPaymentModal({
       }
     }
 
-    if (isManualPayment && !proofFile && !formData.approvalCode) {
-      setError('Please upload proof of payment or enter a manager approval code');
+    // Manual payments without approval code will be saved as 'pending' for manager review
+
+    // Validation for specific payment methods
+    if (formData.method === 'check' && !proofFile) {
+      setError('Please upload a picture of the check');
+      return;
+    }
+
+    if (formData.method === 'wire' && !proofFile) {
+      setError('Please upload a picture of the wire transfer');
+      return;
+    }
+
+    if (formData.method === 'other' && !formData.notes?.trim()) {
+      setError('Please enter a note explaining this payment method');
       return;
     }
 
@@ -313,12 +326,19 @@ export function AddPaymentModal({
           {isManualPayment && (
             <div style={styles.manualSection}>
               <div style={styles.sectionTitle}>Manual Payment Details</div>
+              <div style={styles.pendingNotice}>
+                Without manager approval code, this payment will be <strong>pending</strong> until approved.
+              </div>
 
               {/* Proof Upload */}
               <div style={styles.field}>
                 <label style={styles.label}>
-                  Proof of Payment *
-                  <span style={styles.hint}> (Check photo, wire confirmation, etc.)</span>
+                  Proof of Payment
+                  {(formData.method === 'check' || formData.method === 'wire') ? (
+                    <span style={styles.required}> * (Required)</span>
+                  ) : (
+                    <span style={styles.hint}> (Recommended)</span>
+                  )}
                 </label>
                 <input
                   ref={fileInputRef}
@@ -384,12 +404,17 @@ export function AddPaymentModal({
 
           {/* Notes */}
           <div style={styles.field}>
-            <label style={styles.label}>Notes</label>
+            <label style={styles.label}>
+              Notes
+              {formData.method === 'other' && (
+                <span style={styles.required}> * (Required for "Other" payments)</span>
+              )}
+            </label>
             <textarea
               value={formData.notes || ''}
               onChange={(e) => setFormData({ ...formData, notes: e.target.value })}
               style={styles.textarea}
-              placeholder="Additional notes (optional)"
+              placeholder={formData.method === 'other' ? 'Please describe this payment method' : 'Additional notes (optional)'}
               rows={2}
             />
           </div>
@@ -485,6 +510,11 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: '12px',
     color: '#666',
     fontWeight: 400,
+  },
+  required: {
+    fontSize: '12px',
+    color: '#c62828',
+    fontWeight: 500,
   },
   input: {
     width: '100%',
@@ -583,9 +613,18 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: '13px',
     fontWeight: 600,
     color: '#e65100',
-    marginBottom: '12px',
+    marginBottom: '8px',
     textTransform: 'uppercase',
     letterSpacing: '0.5px',
+  },
+  pendingNotice: {
+    fontSize: '13px',
+    color: '#666',
+    marginBottom: '12px',
+    padding: '8px 10px',
+    backgroundColor: '#fff8e1',
+    borderRadius: '4px',
+    borderLeft: '3px solid #ffa000',
   },
   fileInput: {
     display: 'none',
