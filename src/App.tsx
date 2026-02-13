@@ -1,5 +1,7 @@
-import { useState } from 'react';
-import { AuthProvider, useAuth } from './contexts/AuthContext';
+import { useState, useEffect } from 'react';
+import { collection, query, onSnapshot } from 'firebase/firestore';
+import { db } from './config/firebase';
+import { AuthProvider, useAuth, ViewAsUser } from './contexts/AuthContext';
 import { Login } from './components/Login';
 import { UploadForm } from './components/UploadForm';
 import { Dashboard } from './components/Dashboard';
@@ -8,8 +10,11 @@ import { OrdersList } from './components/orders/OrdersList';
 import { ChangeOrdersList } from './components/orders/ChangeOrdersList';
 import { AdminPanel } from './components/admin/AdminPanel';
 import { ChangeOrderPage } from './components/orders/ChangeOrderPage';
+import { ManagerPayments } from './components/manager/ManagerPayments';
+import { SalesDashboard } from './components/sales/SalesDashboard';
+import { GlobalSearch } from './components/GlobalSearch';
 
-type View = 'upload' | 'dashboard' | 'new-order' | 'orders' | 'change-orders' | 'admin' | 'change-order';
+type View = 'upload' | 'dashboard' | 'new-order' | 'orders' | 'change-orders' | 'admin' | 'change-order' | 'manager-payments' | 'sales-dashboard';
 
 interface ChangeOrderContext {
   orderId: string;
@@ -17,9 +22,39 @@ interface ChangeOrderContext {
 }
 
 function AppContent() {
-  const { user, logout } = useAuth();
-  const [view, setView] = useState<View>('upload');
+  const { user, logout, userRole, actualRole, isManager, canSwitchRoles, setRoleOverride, viewAsUser, setViewAsUser } = useAuth();
+  const [view, setView] = useState<View>('new-order'); // Default to new-order for sales reps
   const [changeOrderContext, setChangeOrderContext] = useState<ChangeOrderContext | null>(null);
+  const [initialOrderNumber, setInitialOrderNumber] = useState<string | null>(null);
+  const [salesRepUsers, setSalesRepUsers] = useState<ViewAsUser[]>([]);
+
+  // Load sales rep users for admin view-as picker
+  useEffect(() => {
+    if (!canSwitchRoles) return;
+    const q = query(collection(db, 'user_roles'));
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const users: ViewAsUser[] = [];
+      snapshot.forEach((doc) => {
+        const data = doc.data();
+        users.push({ name: data.name || doc.id, email: doc.id });
+      });
+      users.sort((a, b) => a.name.localeCompare(b.name));
+      setSalesRepUsers(users);
+    });
+    return unsubscribe;
+  }, [canSwitchRoles]);
+
+  // Handle URL query parameters on mount
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const orderParam = params.get('order');
+    if (orderParam) {
+      setInitialOrderNumber(orderParam.toUpperCase());
+      setView('orders');
+      // Clear the URL param after reading
+      window.history.replaceState({}, '', window.location.pathname);
+    }
+  }, []);
 
   // Navigation helper for change orders
   const navigateToChangeOrder = (orderId: string, changeOrderId?: string) => {
@@ -40,7 +75,13 @@ function AppContent() {
       case 'new-order':
         return <OrderForm onOrderCreated={() => setView('orders')} />;
       case 'orders':
-        return <OrdersList onNavigateToChangeOrder={navigateToChangeOrder} />;
+        return (
+          <OrdersList
+            onNavigateToChangeOrder={navigateToChangeOrder}
+            initialOrderNumber={initialOrderNumber}
+            onInitialOrderHandled={() => setInitialOrderNumber(null)}
+          />
+        );
       case 'change-orders':
         return <ChangeOrdersList onNavigateToChangeOrder={navigateToChangeOrder} />;
       case 'admin':
@@ -65,6 +106,14 @@ function AppContent() {
             }}
           />
         );
+      case 'manager-payments':
+        return <ManagerPayments />;
+      case 'sales-dashboard':
+        return (
+          <SalesDashboard
+            onNavigateToChangeOrder={navigateToChangeOrder}
+          />
+        );
       default:
         return <UploadForm onUploadComplete={() => setView('dashboard')} />;
     }
@@ -76,15 +125,19 @@ function AppContent() {
         <div style={styles.headerLeft}>
           <h1 style={styles.logo}>BBD E-Sign</h1>
           <nav style={styles.nav}>
-            <button
-              onClick={() => setView('upload')}
-              style={{
-                ...styles.navButton,
-                backgroundColor: view === 'upload' ? 'rgba(255,255,255,0.2)' : 'transparent',
-              }}
-            >
-              Upload PDF
-            </button>
+            {/* Manager-only: Upload PDF */}
+            {isManager && (
+              <button
+                onClick={() => setView('upload')}
+                style={{
+                  ...styles.navButton,
+                  backgroundColor: view === 'upload' ? 'rgba(255,255,255,0.2)' : 'transparent',
+                }}
+              >
+                Upload PDF
+              </button>
+            )}
+            {/* All users: New Order */}
             <button
               onClick={() => setView('new-order')}
               style={{
@@ -94,46 +147,141 @@ function AppContent() {
             >
               New Order
             </button>
+            {/* Manager-only: Orders list */}
+            {isManager && (
+              <button
+                onClick={() => setView('orders')}
+                style={{
+                  ...styles.navButton,
+                  backgroundColor: view === 'orders' ? 'rgba(255,255,255,0.2)' : 'transparent',
+                }}
+              >
+                Orders
+              </button>
+            )}
+            {/* Manager-only: Change Orders */}
+            {isManager && (
+              <button
+                onClick={() => setView('change-orders')}
+                style={{
+                  ...styles.navButton,
+                  backgroundColor: view === 'change-orders' ? 'rgba(255,255,255,0.2)' : 'transparent',
+                }}
+              >
+                Change Orders
+              </button>
+            )}
+            {/* Manager-only: Dashboard */}
+            {isManager && (
+              <button
+                onClick={() => setView('dashboard')}
+                style={{
+                  ...styles.navButton,
+                  backgroundColor: view === 'dashboard' ? 'rgba(255,255,255,0.2)' : 'transparent',
+                }}
+              >
+                Dashboard
+              </button>
+            )}
+            {/* Manager-only: Admin */}
+            {isManager && (
+              <button
+                onClick={() => setView('admin')}
+                style={{
+                  ...styles.navButton,
+                  backgroundColor: view === 'admin' ? 'rgba(255,255,255,0.2)' : 'transparent',
+                }}
+              >
+                Admin
+              </button>
+            )}
+            {/* Manager-only: Payments */}
+            {isManager && (
+              <button
+                onClick={() => setView('manager-payments')}
+                style={{
+                  ...styles.navButton,
+                  backgroundColor: view === 'manager-payments' ? 'rgba(255,255,255,0.2)' : 'transparent',
+                }}
+              >
+                Payments
+              </button>
+            )}
+            {/* All users: Sales Dashboard */}
             <button
-              onClick={() => setView('orders')}
+              onClick={() => setView('sales-dashboard')}
               style={{
                 ...styles.navButton,
-                backgroundColor: view === 'orders' ? 'rgba(255,255,255,0.2)' : 'transparent',
+                backgroundColor: view === 'sales-dashboard' ? 'rgba(255,255,255,0.2)' : 'transparent',
               }}
             >
-              Orders
-            </button>
-            <button
-              onClick={() => setView('change-orders')}
-              style={{
-                ...styles.navButton,
-                backgroundColor: view === 'change-orders' ? 'rgba(255,255,255,0.2)' : 'transparent',
-              }}
-            >
-              Change Orders
-            </button>
-            <button
-              onClick={() => setView('dashboard')}
-              style={{
-                ...styles.navButton,
-                backgroundColor: view === 'dashboard' ? 'rgba(255,255,255,0.2)' : 'transparent',
-              }}
-            >
-              Dashboard
-            </button>
-            <button
-              onClick={() => setView('admin')}
-              style={{
-                ...styles.navButton,
-                backgroundColor: view === 'admin' ? 'rgba(255,255,255,0.2)' : 'transparent',
-              }}
-            >
-              Admin
+              Sales
             </button>
           </nav>
         </div>
         <div style={styles.headerRight}>
-          <span style={styles.userEmail}>{user.email}</span>
+          {/* Only show search for managers */}
+          {isManager && (
+            <GlobalSearch
+              onSelectOrder={(orderNumber) => {
+                setInitialOrderNumber(orderNumber);
+                setView('orders');
+              }}
+              onSelectChangeOrder={(orderId, changeOrderId) => {
+                setChangeOrderContext({ orderId, changeOrderId });
+                setView('change-order');
+              }}
+            />
+          )}
+          <div style={styles.userInfo}>
+            <span style={styles.userEmail}>{user.email}</span>
+            {canSwitchRoles ? (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                <select
+                  value={userRole || 'sales_rep'}
+                  onChange={(e) => {
+                    const newRole = e.target.value as 'admin' | 'manager' | 'sales_rep';
+                    setRoleOverride(newRole === actualRole ? null : newRole);
+                    if (newRole !== 'sales_rep') {
+                      setViewAsUser(null);
+                    }
+                  }}
+                  style={styles.roleSelect}
+                >
+                  <option value="admin">Admin</option>
+                  <option value="manager">Manager</option>
+                  <option value="sales_rep">Sales Rep</option>
+                </select>
+                {userRole === 'sales_rep' && salesRepUsers.length > 0 && (
+                  <select
+                    value={viewAsUser?.email || ''}
+                    onChange={(e) => {
+                      const selected = salesRepUsers.find(u => u.email === e.target.value);
+                      setViewAsUser(selected || null);
+                    }}
+                    style={{ ...styles.roleSelect, minWidth: 120 }}
+                  >
+                    <option value="">View as...</option>
+                    {salesRepUsers.map((u) => (
+                      <option key={u.email} value={u.email}>{u.name}</option>
+                    ))}
+                  </select>
+                )}
+                {viewAsUser && (
+                  <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.8)' }}>
+                    as {viewAsUser.name}
+                  </span>
+                )}
+              </div>
+            ) : (
+              <span style={{
+                ...styles.roleBadge,
+                backgroundColor: userRole === 'admin' ? '#4caf50' : userRole === 'manager' ? '#2196F3' : '#ff9800',
+              }}>
+                {userRole === 'admin' ? 'Admin' : userRole === 'manager' ? 'Manager' : 'Sales Rep'}
+              </span>
+            )}
+          </div>
           <button onClick={logout} style={styles.logoutButton}>
             Sign Out
           </button>
@@ -196,11 +344,36 @@ const styles: Record<string, React.CSSProperties> = {
   headerRight: {
     display: 'flex',
     alignItems: 'center',
-    gap: 16,
+    gap: 20,
+  },
+  userInfo: {
+    display: 'flex',
+    flexDirection: 'column',
+    alignItems: 'flex-end',
+    gap: 2,
   },
   userEmail: {
     fontSize: 14,
     opacity: 0.9,
+  },
+  roleBadge: {
+    fontSize: 10,
+    padding: '2px 6px',
+    borderRadius: 4,
+    color: 'white',
+    fontWeight: 600,
+    textTransform: 'uppercase',
+  },
+  roleSelect: {
+    fontSize: 11,
+    padding: '3px 8px',
+    borderRadius: 4,
+    border: '1px solid rgba(255,255,255,0.3)',
+    backgroundColor: 'rgba(255,255,255,0.2)',
+    color: 'white',
+    fontWeight: 600,
+    cursor: 'pointer',
+    outline: 'none',
   },
   logoutButton: {
     padding: '8px 16px',

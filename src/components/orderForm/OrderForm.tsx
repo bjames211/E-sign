@@ -23,7 +23,7 @@ interface OrderFormProps {
 }
 
 export function OrderForm({ onOrderCreated }: OrderFormProps) {
-  const { user } = useAuth();
+  const { user, userName } = useAuth();
   const [formData, setFormData] = useState<OrderFormData>(initialOrderFormData);
   const [adminOptions, setAdminOptions] = useState<Record<AdminOptionType, string[]>>(
     {} as Record<AdminOptionType, string[]>
@@ -37,6 +37,13 @@ export function OrderForm({ onOrderCreated }: OrderFormProps) {
   useEffect(() => {
     loadAdminOptions();
   }, []);
+
+  // Auto-select salesPerson based on logged-in user's name
+  useEffect(() => {
+    if (userName && !formData.salesPerson) {
+      setFormData(prev => ({ ...prev, salesPerson: userName }));
+    }
+  }, [userName]);
 
   // Auto-generate order form name when customer name or manufacturer changes
   useEffect(() => {
@@ -291,7 +298,7 @@ export function OrderForm({ onOrderCreated }: OrderFormProps) {
                 </option>
               ))}
             </select>
-            <p style={styles.fieldHint}>Will auto-select based on logged-in user (coming soon)</p>
+            <p style={styles.fieldHint}>Auto-selected based on logged-in user</p>
           </div>
           <div style={styles.fieldGroup}>
             <label style={styles.label}>Order Form Name</label>
