@@ -1,6 +1,8 @@
 import * as functions from 'firebase-functions/v1';
 import * as admin from 'firebase-admin';
 import Stripe from 'stripe';
+import { createLedgerEntry, updateOrderLedgerSummary } from './paymentLedgerFunctions';
+import { createAuditEntry } from './paymentAuditFunctions';
 
 // Initialize Stripe
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || 'sk_test_placeholder', {
@@ -10,7 +12,6 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || 'sk_test_placeholder'
 // Payment types
 type PaymentMethod = 'stripe' | 'check' | 'wire' | 'credit_on_file' | 'cash' | 'other';
 type PaymentCategory = 'initial_deposit' | 'additional_deposit' | 'balance_payment' | 'refund' | 'adjustment';
-type PaymentRecordStatus = 'pending' | 'verified' | 'approved' | 'failed' | 'cancelled';
 
 interface PaymentProofFile {
   name: string;
@@ -27,7 +28,7 @@ interface AddPaymentRequest {
   method: PaymentMethod;
   category: PaymentCategory;
   stripePaymentId?: string;
-  stripeTestMode?: boolean;           // Skip Stripe verification for testing
+  stripeTestMode?: boolean;
   changeOrderId?: string;
   description?: string;
   notes?: string;
@@ -51,68 +52,10 @@ interface VerifyStripeRequest {
   stripePaymentId: string;
 }
 
-interface PaymentSummary {
-  totalPaid: number;
-  totalPending: number;
-  balance: number;
-  paymentCount: number;
-  lastPaymentAt?: FirebaseFirestore.Timestamp;
-}
-
-// Helper to calculate payment summary
-async function calculatePaymentSummary(orderId: string, db: FirebaseFirestore.Firestore): Promise<PaymentSummary> {
-  const paymentsQuery = await db
-    .collection('payments')
-    .where('orderId', '==', orderId)
-    .get();
-
-  let totalPaid = 0;
-  let totalPending = 0;
-  let lastPaymentAt: FirebaseFirestore.Timestamp | undefined;
-
-  paymentsQuery.docs.forEach((doc) => {
-    const payment = doc.data();
-    if (payment.status === 'verified' || payment.status === 'approved') {
-      totalPaid += payment.amount;
-      if (!lastPaymentAt || (payment.createdAt && payment.createdAt.toMillis() > lastPaymentAt.toMillis())) {
-        lastPaymentAt = payment.createdAt;
-      }
-    } else if (payment.status === 'pending') {
-      totalPending += payment.amount;
-    }
-  });
-
-  // Get order to know deposit required
-  const orderSnap = await db.collection('orders').doc(orderId).get();
-  const depositRequired = orderSnap.exists ? (orderSnap.data()?.pricing?.deposit || 0) : 0;
-
-  const summary: PaymentSummary = {
-    totalPaid,
-    totalPending,
-    balance: depositRequired - totalPaid,
-    paymentCount: paymentsQuery.docs.length,
-  };
-
-  // Only include lastPaymentAt if it exists (Firestore doesn't accept undefined)
-  if (lastPaymentAt) {
-    summary.lastPaymentAt = lastPaymentAt;
-  }
-
-  return summary;
-}
-
-// Helper to update order's payment summary
-async function updateOrderPaymentSummary(orderId: string, db: FirebaseFirestore.Firestore): Promise<void> {
-  const summary = await calculatePaymentSummary(orderId, db);
-  await db.collection('orders').doc(orderId).update({
-    paymentSummary: summary,
-    updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-  });
-}
+const LEDGER_COLLECTION = 'payment_ledger';
 
 /**
- * Add a new payment record
- * Optionally verifies Stripe payment if stripePaymentId is provided
+ * Add a new payment record (now writes to payment_ledger)
  */
 export const addPaymentRecord = functions.https.onRequest(async (req, res) => {
   res.set('Access-Control-Allow-Origin', '*');
@@ -168,22 +111,18 @@ export const addPaymentRecord = functions.https.onRequest(async (req, res) => {
       return;
     }
 
-    // Determine initial status
-    let status: PaymentRecordStatus = 'pending';
+    // Determine initial status and Stripe verification
+    let status: 'pending' | 'verified' | 'approved' = 'pending';
     let stripeVerified = false;
     let stripeAmount: number | undefined;
     let stripeAmountDollars: number | undefined;
-    let stripeStatus: string | undefined;
-    let isTestPayment = false;
 
     // For Stripe payments in test mode, skip verification and auto-approve
     if (data.method === 'stripe' && data.stripeTestMode) {
-      isTestPayment = true;
       status = 'verified';
       stripeVerified = true;
       stripeAmountDollars = data.amount;
       stripeAmount = Math.round(data.amount * 100);
-      stripeStatus = 'test_mode';
       console.log(`Test mode Stripe payment: $${data.amount} for order ${data.orderNumber}`);
     }
     // For Stripe payments, verify the payment ID
@@ -194,13 +133,11 @@ export const addPaymentRecord = functions.https.onRequest(async (req, res) => {
           stripeVerified = paymentIntent.status === 'succeeded';
           stripeAmount = paymentIntent.amount;
           stripeAmountDollars = paymentIntent.amount / 100;
-          stripeStatus = paymentIntent.status;
         } else if (data.stripePaymentId.startsWith('ch_')) {
           const charge = await stripe.charges.retrieve(data.stripePaymentId);
           stripeVerified = charge.paid && charge.status === 'succeeded';
           stripeAmount = charge.amount;
           stripeAmountDollars = charge.amount / 100;
-          stripeStatus = charge.status;
         }
 
         if (stripeVerified) {
@@ -208,86 +145,61 @@ export const addPaymentRecord = functions.https.onRequest(async (req, res) => {
         }
       } catch (stripeError) {
         console.error('Stripe verification failed:', stripeError);
-        // Continue with pending status
       }
     }
 
     // For manual payments with approval code, auto-approve
     const manualMethods = ['check', 'wire', 'credit_on_file', 'cash', 'other'];
-    let approvedBy: string | undefined;
-    let approvedAt: FirebaseFirestore.FieldValue | undefined;
-
     if (manualMethods.includes(data.method) && data.approvalCode) {
       const validCode = process.env.MANAGER_APPROVAL_CODE || 'BBD2024!';
       if (data.approvalCode === validCode || data.approvalCode.toLowerCase() === 'test') {
         status = 'approved';
-        approvedBy = data.createdBy;
-        approvedAt = admin.firestore.FieldValue.serverTimestamp();
       }
     }
 
-    // Build payment record
-    const paymentRecord: Record<string, unknown> = {
+    // Determine transaction type
+    const transactionType = data.category === 'refund' ? 'refund' : 'payment';
+
+    // Map category to ledger category
+    const categoryMap: Record<string, string> = {
+      'initial_deposit': 'initial_deposit',
+      'additional_deposit': 'additional_deposit',
+      'balance_payment': 'additional_deposit',
+      'refund': 'refund',
+      'adjustment': 'change_order_adjustment',
+    };
+    const ledgerCategory = categoryMap[data.category] || 'initial_deposit';
+
+    // Create ledger entry
+    const { entryId, paymentNumber } = await createLedgerEntry({
       orderId: data.orderId,
       orderNumber: data.orderNumber,
-      amount: data.amount,
+      transactionType: transactionType as any,
+      amount: Math.abs(data.amount),
       method: data.method,
-      category: data.category,
+      category: ledgerCategory as any,
       status,
+      stripePaymentId: data.stripePaymentId,
+      stripeVerified: stripeVerified || undefined,
+      stripeAmount,
+      stripeAmountDollars,
+      changeOrderId: data.changeOrderId,
+      description: data.description || `${data.method} payment`,
+      notes: data.notes,
+      proofFile: data.proofFile,
+      approvedBy: status === 'approved' ? data.createdBy : undefined,
       createdBy: data.createdBy,
-      createdAt: admin.firestore.FieldValue.serverTimestamp(),
-      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-    };
+    }, db);
 
-    // Add optional fields
-    if (data.stripePaymentId) {
-      paymentRecord.stripePaymentId = data.stripePaymentId;
-    }
-    if (stripeVerified !== undefined) {
-      paymentRecord.stripeVerified = stripeVerified;
-    }
-    if (stripeAmount !== undefined) {
-      paymentRecord.stripeAmount = stripeAmount;
-    }
-    if (stripeAmountDollars !== undefined) {
-      paymentRecord.stripeAmountDollars = stripeAmountDollars;
-    }
-    if (stripeStatus) {
-      paymentRecord.stripeStatus = stripeStatus;
-    }
-    if (isTestPayment) {
-      paymentRecord.isTestPayment = true;
-    }
-    if (data.changeOrderId) {
-      paymentRecord.changeOrderId = data.changeOrderId;
-    }
-    if (data.description) {
-      paymentRecord.description = data.description;
-    }
-    if (data.notes) {
-      paymentRecord.notes = data.notes;
-    }
-    if (data.proofFile) {
-      paymentRecord.proofFile = data.proofFile;
-    }
-    if (approvedBy) {
-      paymentRecord.approvedBy = approvedBy;
-    }
-    if (approvedAt) {
-      paymentRecord.approvedAt = approvedAt;
-    }
+    // Update order's ledger summary
+    await updateOrderLedgerSummary(data.orderId, db);
 
-    // Save payment record
-    const docRef = await db.collection('payments').add(paymentRecord);
-
-    // Update order's payment summary
-    await updateOrderPaymentSummary(data.orderId, db);
-
-    console.log(`Payment record created: ${docRef.id} for order ${data.orderNumber}`);
+    console.log(`Ledger entry ${paymentNumber} created for order ${data.orderNumber}`);
 
     res.status(200).json({
       success: true,
-      paymentId: docRef.id,
+      paymentId: entryId,
+      paymentNumber,
       status,
       stripeVerified,
       stripeAmountDollars,
@@ -333,53 +245,50 @@ export const approvePaymentRecord = functions.https.onRequest(async (req, res) =
       return;
     }
 
-    // Verify manager approval code (also accept "test" for testing)
+    // Verify manager approval code
     const validCode = process.env.MANAGER_APPROVAL_CODE || 'BBD2024!';
     if (approvalCode !== validCode && approvalCode.toLowerCase() !== 'test') {
       res.status(403).json({ error: 'Invalid manager approval code' });
       return;
     }
 
-    // Get payment record
-    const paymentRef = db.collection('payments').doc(paymentId);
-    const paymentSnap = await paymentRef.get();
+    // Get ledger entry
+    const entryRef = db.collection(LEDGER_COLLECTION).doc(paymentId);
+    const entrySnap = await entryRef.get();
 
-    if (!paymentSnap.exists) {
+    if (!entrySnap.exists) {
       res.status(404).json({ error: 'Payment record not found' });
       return;
     }
 
-    const payment = paymentSnap.data();
+    const entry = entrySnap.data()!;
+    const previousStatus = entry.status;
 
-    if (payment?.status !== 'pending') {
+    if (entry.status !== 'pending') {
       res.status(400).json({ error: 'Can only approve pending payments' });
       return;
     }
 
-    // Determine status based on method
+    // Determine new status
     const isStripe = method === 'stripe';
     const newStatus = isStripe ? 'verified' : 'approved';
 
-    // Update payment record
+    // Update ledger entry
     const updateData: Record<string, unknown> = {
       status: newStatus,
       approvedBy: approvedBy || 'Manager',
       approvedAt: admin.firestore.FieldValue.serverTimestamp(),
-      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
     };
 
-    // Update method if provided
     if (method) {
       updateData.method = method;
     }
 
-    // Add Stripe payment ID if provided
     if (stripePaymentId) {
       updateData.stripePaymentId = stripePaymentId;
       updateData.stripeVerified = true;
     }
 
-    // Add proof file if provided
     if (proofFile) {
       updateData.proofFile = proofFile;
     }
@@ -388,12 +297,25 @@ export const approvePaymentRecord = functions.https.onRequest(async (req, res) =
       updateData.notes = notes;
     }
 
-    await paymentRef.update(updateData);
+    await entryRef.update(updateData);
 
-    // Update order's payment summary
-    await updateOrderPaymentSummary(payment?.orderId, db);
+    // Create audit entry
+    await createAuditEntry({
+      ledgerEntryId: paymentId,
+      paymentNumber: entry.paymentNumber,
+      orderId: entry.orderId,
+      orderNumber: entry.orderNumber,
+      action: 'approved',
+      previousStatus,
+      newStatus,
+      userId: approvedBy || 'Manager',
+      details: `Payment approved by ${approvedBy || 'Manager'}`,
+    }, db);
 
-    console.log(`Payment record ${paymentId} approved by ${approvedBy}`);
+    // Update order's ledger summary
+    await updateOrderLedgerSummary(entry.orderId, db);
+
+    console.log(`Ledger entry ${paymentId} approved by ${approvedBy}`);
 
     res.status(200).json({
       success: true,
@@ -409,7 +331,7 @@ export const approvePaymentRecord = functions.https.onRequest(async (req, res) =
 });
 
 /**
- * Verify a Stripe payment ID on an existing payment record
+ * Verify a Stripe payment ID on an existing ledger entry
  */
 export const verifyStripePaymentRecord = functions.https.onRequest(async (req, res) => {
   res.set('Access-Control-Allow-Origin', '*');
@@ -450,11 +372,11 @@ export const verifyStripePaymentRecord = functions.https.onRequest(async (req, r
       return;
     }
 
-    // Get payment record
-    const paymentRef = db.collection('payments').doc(paymentId);
-    const paymentSnap = await paymentRef.get();
+    // Get ledger entry
+    const entryRef = db.collection(LEDGER_COLLECTION).doc(paymentId);
+    const entrySnap = await entryRef.get();
 
-    if (!paymentSnap.exists) {
+    if (!entrySnap.exists) {
       res.status(404).json({ error: 'Payment record not found' });
       return;
     }
@@ -496,35 +418,45 @@ export const verifyStripePaymentRecord = functions.https.onRequest(async (req, r
       throw stripeError;
     }
 
-    // Update payment record
-    const newStatus: PaymentRecordStatus = verified ? 'verified' : 'failed';
-    // Refunds are negative amounts
-    const amountDollars = isRefund ? -(amount / 100) : (amount / 100);
+    const entry = entrySnap.data()!;
+    const previousStatus = entry.status;
+    const newStatus = verified ? 'verified' : entry.status;
+    const amountDollars = amount / 100;
 
-    await paymentRef.update({
+    // Update ledger entry
+    await entryRef.update({
       status: newStatus,
       stripePaymentId,
       stripeVerified: verified,
       stripeAmount: amount,
-      stripeAmountDollars: Math.abs(amountDollars), // Store absolute value
-      stripeStatus: status,
-      stripeType: stripeType,
-      // If it's a refund, update the amount to be negative
-      ...(isRefund ? { amount: amountDollars } : {}),
-      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      stripeAmountDollars: amountDollars,
     });
 
-    // Update order's payment summary
-    const payment = paymentSnap.data();
-    await updateOrderPaymentSummary(payment?.orderId, db);
+    // Create audit entry
+    if (verified && previousStatus !== 'verified') {
+      await createAuditEntry({
+        ledgerEntryId: paymentId,
+        paymentNumber: entry.paymentNumber,
+        orderId: entry.orderId,
+        orderNumber: entry.orderNumber,
+        action: 'verified',
+        previousStatus,
+        newStatus,
+        userId: 'stripe_verification',
+        details: `Verified via Stripe (${stripePaymentId})`,
+      }, db);
+    }
 
-    console.log(`${isRefund ? 'Refund' : 'Payment'} record ${paymentId} Stripe verification: ${verified ? 'SUCCESS' : 'FAILED'}`);
+    // Update order's ledger summary
+    await updateOrderLedgerSummary(entry.orderId, db);
+
+    console.log(`Ledger entry ${paymentId} Stripe verification: ${verified ? 'SUCCESS' : 'FAILED'}`);
 
     res.status(200).json({
       success: true,
       verified,
-      amount: isRefund ? -amount : amount, // Return negative for refunds
-      amountDollars,
+      amount: isRefund ? -amount : amount,
+      amountDollars: isRefund ? -amountDollars : amountDollars,
       stripeStatus: status,
       stripeType,
       isRefund,
@@ -540,7 +472,7 @@ export const verifyStripePaymentRecord = functions.https.onRequest(async (req, r
 });
 
 /**
- * Reject a payment
+ * Reject a payment (voids the ledger entry)
  */
 export const rejectPaymentRecord = functions.https.onRequest(async (req, res) => {
   res.set('Access-Control-Allow-Origin', '*');
@@ -571,35 +503,47 @@ export const rejectPaymentRecord = functions.https.onRequest(async (req, res) =>
       return;
     }
 
-    // Get payment record
-    const paymentRef = db.collection('payments').doc(paymentId);
-    const paymentSnap = await paymentRef.get();
+    // Get ledger entry
+    const entryRef = db.collection(LEDGER_COLLECTION).doc(paymentId);
+    const entrySnap = await entryRef.get();
 
-    if (!paymentSnap.exists) {
+    if (!entrySnap.exists) {
       res.status(404).json({ error: 'Payment record not found' });
       return;
     }
 
-    const payment = paymentSnap.data();
+    const entry = entrySnap.data()!;
 
-    if (payment?.status !== 'pending') {
+    if (entry.status !== 'pending') {
       res.status(400).json({ error: 'Can only reject pending payments' });
       return;
     }
 
-    // Update payment record
-    await paymentRef.update({
-      status: 'failed',
-      rejectedBy: rejectedBy || 'Manager',
-      rejectedAt: admin.firestore.FieldValue.serverTimestamp(),
-      rejectionReason: reason,
-      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    // Void the ledger entry
+    await entryRef.update({
+      status: 'voided',
+      voidedBy: rejectedBy || 'Manager',
+      voidedAt: admin.firestore.FieldValue.serverTimestamp(),
+      voidReason: reason,
     });
 
-    // Update order's payment summary
-    await updateOrderPaymentSummary(payment?.orderId, db);
+    // Create audit entry
+    await createAuditEntry({
+      ledgerEntryId: paymentId,
+      paymentNumber: entry.paymentNumber,
+      orderId: entry.orderId,
+      orderNumber: entry.orderNumber,
+      action: 'voided',
+      previousStatus: entry.status,
+      newStatus: 'voided',
+      userId: rejectedBy || 'Manager',
+      details: `Payment rejected: ${reason}`,
+    }, db);
 
-    console.log(`Payment record ${paymentId} rejected: ${reason}`);
+    // Update order's ledger summary
+    await updateOrderLedgerSummary(entry.orderId, db);
+
+    console.log(`Ledger entry ${paymentId} rejected: ${reason}`);
 
     res.status(200).json({
       success: true,
@@ -615,7 +559,7 @@ export const rejectPaymentRecord = functions.https.onRequest(async (req, res) =>
 });
 
 /**
- * Get payment records for an order
+ * Get payment records for an order (now reads from payment_ledger)
  */
 export const getPaymentsForOrder = functions.https.onRequest(async (req, res) => {
   res.set('Access-Control-Allow-Origin', '*');
@@ -641,22 +585,52 @@ export const getPaymentsForOrder = functions.https.onRequest(async (req, res) =>
       return;
     }
 
-    const paymentsQuery = await db
-      .collection('payments')
+    const entriesQuery = await db
+      .collection(LEDGER_COLLECTION)
       .where('orderId', '==', orderId)
       .orderBy('createdAt', 'desc')
       .get();
 
-    const payments = paymentsQuery.docs.map((doc) => ({
+    const entries = entriesQuery.docs.map((doc) => ({
       id: doc.id,
       ...doc.data(),
     }));
 
-    // Also get the summary
-    const summary = await calculatePaymentSummary(orderId, db);
+    // Calculate summary from ledger entries
+    let totalPaid = 0;
+    let totalPending = 0;
+    let totalRefunded = 0;
+
+    entriesQuery.docs.forEach((doc) => {
+      const entry = doc.data();
+      if (entry.status === 'voided') return;
+
+      if (entry.transactionType === 'refund') {
+        if (entry.status === 'verified' || entry.status === 'approved') {
+          totalRefunded += entry.amount;
+        }
+      } else if (entry.transactionType === 'payment') {
+        if (entry.status === 'verified' || entry.status === 'approved') {
+          totalPaid += entry.amount;
+        } else if (entry.status === 'pending') {
+          totalPending += entry.amount;
+        }
+      }
+    });
+
+    const orderSnap = await db.collection('orders').doc(orderId).get();
+    const depositRequired = orderSnap.exists ? (orderSnap.data()?.pricing?.deposit || 0) : 0;
+    const netReceived = totalPaid - totalRefunded;
+
+    const summary = {
+      totalPaid: netReceived,
+      totalPending,
+      balance: depositRequired - netReceived,
+      paymentCount: entriesQuery.docs.filter(d => d.data().status !== 'voided').length,
+    };
 
     res.status(200).json({
-      payments,
+      payments: entries,
       summary,
     });
   } catch (error) {
@@ -689,7 +663,6 @@ export const chargeCardOnFile = functions.https.onRequest(async (req, res) => {
   try {
     const { orderId, orderNumber, customerId, amount, description } = req.body;
 
-    // Validate required fields
     if (!orderId || !orderNumber) {
       res.status(400).json({ error: 'orderId and orderNumber are required' });
       return;
@@ -716,8 +689,12 @@ export const chargeCardOnFile = functions.https.onRequest(async (req, res) => {
     const stripeCustomer = customer as Stripe.Customer;
     const defaultPaymentMethod = stripeCustomer.invoice_settings?.default_payment_method as string | null;
 
-    if (!defaultPaymentMethod) {
-      // Try to get the first payment method attached to the customer
+    // Get the payment method to use
+    let paymentMethodId: string;
+
+    if (defaultPaymentMethod) {
+      paymentMethodId = defaultPaymentMethod;
+    } else {
       const paymentMethods = await stripe.paymentMethods.list({
         customer: customerId,
         type: 'card',
@@ -728,77 +705,43 @@ export const chargeCardOnFile = functions.https.onRequest(async (req, res) => {
         return;
       }
 
-      // Use the first card
-      const paymentMethodId = paymentMethods.data[0].id;
+      paymentMethodId = paymentMethods.data[0].id;
+    }
 
-      // Create and confirm payment intent with the card
-      const paymentIntent = await stripe.paymentIntents.create({
-        amount: Math.round(amount * 100), // Convert to cents
-        currency: 'usd',
-        customer: customerId,
-        payment_method: paymentMethodId,
-        confirm: true,
-        off_session: true,
-        description: description || `Additional deposit for order ${orderNumber}`,
-        metadata: {
-          orderId,
-          orderNumber,
-          type: 'additional_deposit',
-        },
+    // Create and confirm payment intent
+    const paymentIntent = await stripe.paymentIntents.create({
+      amount: Math.round(amount * 100),
+      currency: 'usd',
+      customer: customerId,
+      payment_method: paymentMethodId,
+      confirm: true,
+      off_session: true,
+      description: description || `Additional deposit for order ${orderNumber}`,
+      metadata: {
+        orderId,
+        orderNumber,
+        type: 'additional_deposit',
+      },
+    });
+
+    if (paymentIntent.status === 'succeeded') {
+      console.log(`Card charged successfully: ${paymentIntent.id} for order ${orderNumber}`);
+      res.status(200).json({
+        success: true,
+        paymentId: paymentIntent.id,
+        amount,
+        status: paymentIntent.status,
       });
-
-      if (paymentIntent.status === 'succeeded') {
-        console.log(`Card charged successfully: ${paymentIntent.id} for order ${orderNumber}`);
-        res.status(200).json({
-          success: true,
-          paymentId: paymentIntent.id,
-          amount: amount,
-          status: paymentIntent.status,
-        });
-      } else {
-        res.status(400).json({
-          success: false,
-          error: `Payment failed with status: ${paymentIntent.status}`,
-          paymentId: paymentIntent.id,
-        });
-      }
     } else {
-      // Use the default payment method
-      const paymentIntent = await stripe.paymentIntents.create({
-        amount: Math.round(amount * 100), // Convert to cents
-        currency: 'usd',
-        customer: customerId,
-        payment_method: defaultPaymentMethod,
-        confirm: true,
-        off_session: true,
-        description: description || `Additional deposit for order ${orderNumber}`,
-        metadata: {
-          orderId,
-          orderNumber,
-          type: 'additional_deposit',
-        },
+      res.status(400).json({
+        success: false,
+        error: `Payment failed with status: ${paymentIntent.status}`,
+        paymentId: paymentIntent.id,
       });
-
-      if (paymentIntent.status === 'succeeded') {
-        console.log(`Card charged successfully: ${paymentIntent.id} for order ${orderNumber}`);
-        res.status(200).json({
-          success: true,
-          paymentId: paymentIntent.id,
-          amount: amount,
-          status: paymentIntent.status,
-        });
-      } else {
-        res.status(400).json({
-          success: false,
-          error: `Payment failed with status: ${paymentIntent.status}`,
-          paymentId: paymentIntent.id,
-        });
-      }
     }
   } catch (error) {
     console.error('Error charging card on file:', error);
 
-    // Handle specific Stripe errors
     if (error instanceof Stripe.errors.StripeCardError) {
       res.status(400).json({
         success: false,
@@ -817,8 +760,7 @@ export const chargeCardOnFile = functions.https.onRequest(async (req, res) => {
 });
 
 /**
- * Recalculate and update payment summary for an order
- * Useful for fixing out-of-sync summaries
+ * Recalculate and update ledger summary for an order
  */
 export const recalculatePaymentSummary = functions.https.onRequest(async (req, res) => {
   res.set('Access-Control-Allow-Origin', '*');
@@ -844,14 +786,22 @@ export const recalculatePaymentSummary = functions.https.onRequest(async (req, r
       return;
     }
 
-    await updateOrderPaymentSummary(orderId, db);
-    const summary = await calculatePaymentSummary(orderId, db);
+    await updateOrderLedgerSummary(orderId, db);
 
-    console.log(`Payment summary recalculated for order ${orderId}`);
+    // Read back the summary
+    const orderSnap = await db.collection('orders').doc(orderId).get();
+    const ledgerSummary = orderSnap.data()?.ledgerSummary;
+
+    console.log(`Ledger summary recalculated for order ${orderId}`);
 
     res.status(200).json({
       success: true,
-      summary,
+      summary: ledgerSummary || {
+        totalPaid: 0,
+        totalPending: 0,
+        balance: 0,
+        paymentCount: 0,
+      },
     });
   } catch (error) {
     console.error('Error recalculating payment summary:', error);

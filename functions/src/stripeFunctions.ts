@@ -849,66 +849,7 @@ export const approveManualPayment = functions.https.onRequest(async (req, res) =
       });
     }
 
-    // Create PaymentRecord for the new payment system (legacy - keeping for backwards compatibility)
-    try {
-      const depositRequired = orderData?.pricing?.deposit || 0;
-      const paymentRecord = {
-        orderId,
-        orderNumber: orderData?.orderNumber || '',
-        amount: amount,  // Use the provided payment amount
-        method: paymentType,
-        category: 'initial_deposit',
-        status: 'approved',
-        proofFile: {
-          name: proofFile.name,
-          storagePath: proofFile.storagePath,
-          downloadUrl: proofFile.downloadUrl,
-          size: proofFile.size || 0,
-          type: proofFile.type || 'image/jpeg',
-        },
-        approvedBy: approvedBy || 'Manager',
-        approvedAt: admin.firestore.FieldValue.serverTimestamp(),
-        description: `Manual payment via ${paymentType}`,
-        notes: notes || '',
-        createdBy: approvedBy || 'Manager',
-        createdAt: admin.firestore.FieldValue.serverTimestamp(),
-        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-      };
-      await db.collection('payments').add(paymentRecord);
-      console.log(`PaymentRecord created for order ${orderId} with amount $${amount}`);
-
-      // Update order payment summary (legacy)
-      const paymentsQuery = await db
-        .collection('payments')
-        .where('orderId', '==', orderId)
-        .get();
-
-      let totalPaid = 0;
-      let totalPending = 0;
-      paymentsQuery.docs.forEach((doc) => {
-        const payment = doc.data();
-        if (payment.status === 'verified' || payment.status === 'approved') {
-          totalPaid += payment.amount;
-        } else if (payment.status === 'pending') {
-          totalPending += payment.amount;
-        }
-      });
-
-      await orderRef.update({
-        paymentSummary: {
-          totalPaid,
-          totalPending,
-          balance: depositRequired - totalPaid,
-          paymentCount: paymentsQuery.docs.length,
-          lastPaymentAt: admin.firestore.FieldValue.serverTimestamp(),
-        },
-      });
-    } catch (paymentRecordError) {
-      console.error('Error creating PaymentRecord:', paymentRecordError);
-      // Don't fail if PaymentRecord creation fails
-    }
-
-    // Create Payment Ledger entry (new single source of truth system)
+    // Create Payment Ledger entry (single source of truth)
     try {
       await createLedgerEntry({
         orderId,
@@ -1138,61 +1079,7 @@ export const stripeWebhook = functions.https.onRequest(async (req, res) => {
               console.log(`Order ${orderId} is now ready for manufacturer`);
             }
 
-            // Create PaymentRecord for the new payment system (legacy - keeping for backwards compatibility)
-            try {
-              const paymentRecord = {
-                orderId,
-                orderNumber: orderData?.orderNumber || '',
-                amount: paymentIntent.amount / 100,
-                method: 'stripe',
-                category: 'initial_deposit',
-                status: 'verified',
-                stripePaymentId: paymentIntent.id,
-                stripeVerified: true,
-                stripeAmount: paymentIntent.amount,
-                stripeAmountDollars: paymentIntent.amount / 100,
-                stripeStatus: 'succeeded',
-                description: 'Automatic payment via Stripe',
-                createdBy: 'stripe_webhook',
-                createdAt: admin.firestore.FieldValue.serverTimestamp(),
-                updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-              };
-              await db.collection('payments').add(paymentRecord);
-              console.log(`PaymentRecord created for order ${orderId}`);
-
-              // Update order payment summary (legacy)
-              const paymentsQuery = await db
-                .collection('payments')
-                .where('orderId', '==', orderId)
-                .get();
-
-              let totalPaid = 0;
-              let totalPending = 0;
-              paymentsQuery.docs.forEach((doc) => {
-                const payment = doc.data();
-                if (payment.status === 'verified' || payment.status === 'approved') {
-                  totalPaid += payment.amount;
-                } else if (payment.status === 'pending') {
-                  totalPending += payment.amount;
-                }
-              });
-
-              const depositRequired = orderData?.pricing?.deposit || 0;
-              await orderRef.update({
-                paymentSummary: {
-                  totalPaid,
-                  totalPending,
-                  balance: depositRequired - totalPaid,
-                  paymentCount: paymentsQuery.docs.length,
-                  lastPaymentAt: admin.firestore.FieldValue.serverTimestamp(),
-                },
-              });
-            } catch (paymentRecordError) {
-              console.error('Error creating PaymentRecord:', paymentRecordError);
-              // Don't fail the webhook if PaymentRecord creation fails
-            }
-
-            // Create Payment Ledger entry (new single source of truth system)
+            // Create Payment Ledger entry (single source of truth)
             try {
               const { entryId, paymentNumber } = await createLedgerEntry({
                 orderId,

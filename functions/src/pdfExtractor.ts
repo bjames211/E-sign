@@ -1,14 +1,9 @@
 import Anthropic from '@anthropic-ai/sdk';
+import { getDepositPercent } from './manufacturerConfigService';
 
 const anthropic = new Anthropic({
   apiKey: process.env.ANTHROPIC_API_KEY,
 });
-
-// Expected deposit percentages by installer
-const DEPOSIT_PERCENTAGES: Record<string, number> = {
-  'Eagle Carports': 19,
-  'American Carports': 20,
-};
 
 export interface ExtractedPdfData {
   customerName: string | null;
@@ -109,14 +104,14 @@ Return ONLY the JSON, no other text.`,
     const subtotal = parsed.subtotal ? Number(parsed.subtotal) : null;
     const downPayment = parsed.downPayment ? Number(parsed.downPayment) : null;
 
-    // Calculate deposit validation
-    const expectedPercent = DEPOSIT_PERCENTAGES[installer] || null;
+    // Calculate deposit validation (skip if no percent configured for this manufacturer)
+    const expectedPercent = await getDepositPercent(installer, subtotal || 0);
     let expectedAmount: number | null = null;
     let actualPercent: number | null = null;
     let depositDiscrepancy = false;
     let discrepancyAmount: number | null = null;
 
-    if (subtotal && expectedPercent) {
+    if (subtotal && expectedPercent != null) {
       expectedAmount = Math.round((subtotal * expectedPercent / 100) * 100) / 100;
 
       if (downPayment !== null) {

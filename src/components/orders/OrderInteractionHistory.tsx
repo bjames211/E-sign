@@ -3,7 +3,7 @@ import { collection, query, where, getDocs, Timestamp } from 'firebase/firestore
 import { db } from '../../config/firebase';
 import { Order } from '../../types/order';
 import { ChangeOrder } from '../../types/changeOrder';
-import { PaymentRecord } from '../../types/payment';
+import { PaymentLedgerEntry } from '../../types/payment';
 
 interface EsignDocument {
   id: string;
@@ -93,7 +93,7 @@ const STATUS_COLORS: Record<string, { bg: string; color: string }> = {
 
 export function OrderInteractionHistory({ order, changeOrders }: OrderInteractionHistoryProps) {
   const [esignDocs, setEsignDocs] = useState<EsignDocument[]>([]);
-  const [paymentRecords, setPaymentRecords] = useState<PaymentRecord[]>([]);
+  const [paymentRecords, setPaymentRecords] = useState<PaymentLedgerEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -112,14 +112,14 @@ export function OrderInteractionHistory({ order, changeOrders }: OrderInteractio
     if (!order.id) return;
     try {
       const q = query(
-        collection(db, 'payments'),
+        collection(db, 'payment_ledger'),
         where('orderId', '==', order.id)
       );
       const snapshot = await getDocs(q);
       const records = snapshot.docs.map(doc => ({
         id: doc.id,
         ...doc.data(),
-      })) as PaymentRecord[];
+      })) as PaymentLedgerEntry[];
       // Sort by createdAt descending
       const getTime = (ts: any): number => {
         if (!ts) return 0;
@@ -343,26 +343,28 @@ export function OrderInteractionHistory({ order, changeOrders }: OrderInteractio
       }
     }
 
-    // Add payment records from payments collection (additional payments)
+    // Add payment records from payment_ledger
     for (const record of paymentRecords) {
+      if (record.status === 'voided') continue; // Skip voided entries
       const statusLabel = record.status === 'approved' || record.status === 'verified' ? 'Paid' :
-                          record.status === 'pending' ? 'Pending' :
-                          record.status === 'failed' ? 'Failed' : record.status;
+                          record.status === 'pending' ? 'Pending' : record.status;
       const statusColors = STATUS_COLORS[record.status === 'approved' || record.status === 'verified' ? 'paid' : record.status] || { bg: '#f5f5f5', color: '#666' };
+      const typeLabel = record.transactionType === 'refund' ? 'Refund' : 'Payment';
 
       items.push({
         id: `payment-record-${record.id}`,
         type: 'payment',
         timestamp: record.createdAt || Timestamp.now(),
-        title: `Payment: ${record.category?.replace(/_/g, ' ').toUpperCase() || 'PAYMENT'}`,
-        description: `Amount: $${record.amount.toLocaleString()}`,
+        title: `${typeLabel}: ${record.category?.replace(/_/g, ' ').toUpperCase() || 'PAYMENT'}`,
+        description: `Amount: $${record.amount.toLocaleString()}${record.paymentNumber ? ` (${record.paymentNumber})` : ''}`,
         status: statusLabel,
         statusColor: statusColors.color,
         details: {
           'Amount': `$${record.amount.toLocaleString()}`,
           'Method': record.method?.replace(/_/g, ' ') || 'Unknown',
-          'Category': record.category?.replace(/_/g, ' ') || 'Unknown',
+          'Type': record.transactionType || 'payment',
           'Status': statusLabel,
+          ...(record.paymentNumber && { 'Payment #': record.paymentNumber }),
           ...(record.stripePaymentId && { 'Stripe ID': record.stripePaymentId }),
           ...(record.approvedBy && { 'Approved By': record.approvedBy }),
           ...(record.description && { 'Description': record.description }),

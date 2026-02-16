@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
-import { collection, query, onSnapshot } from 'firebase/firestore';
+import { collection, query, onSnapshot, where, getDocs } from 'firebase/firestore';
 import { db } from './config/firebase';
+import { setDepositConfigs } from './types/order';
 import { AuthProvider, useAuth, ViewAsUser } from './contexts/AuthContext';
 import { Login } from './components/Login';
 import { UploadForm } from './components/UploadForm';
@@ -43,6 +44,32 @@ function AppContent() {
     });
     return unsubscribe;
   }, [canSwitchRoles]);
+
+  // Load manufacturer config from Firestore (deposit percentages + tiers)
+  useEffect(() => {
+    const loadConfig = async () => {
+      try {
+        const q = query(collection(db, 'manufacturer_config'), where('active', '==', true));
+        const snapshot = await getDocs(q);
+        const configs: Record<string, { percent?: number | null; tiers?: { upTo: number | null; percent: number }[] }> = {};
+        snapshot.forEach((doc) => {
+          const data = doc.data();
+          if (data.name && (data.depositPercent != null || (data.depositTiers && data.depositTiers.length > 0))) {
+            configs[data.name] = {
+              percent: data.depositPercent ?? null,
+              tiers: data.depositTiers,
+            };
+          }
+        });
+        if (Object.keys(configs).length > 0) {
+          setDepositConfigs(configs);
+        }
+      } catch (err) {
+        console.warn('Could not load manufacturer config, using defaults:', err);
+      }
+    };
+    loadConfig();
+  }, []);
 
   // Handle URL query parameters on mount
   useEffect(() => {

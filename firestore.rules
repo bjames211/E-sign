@@ -3,8 +3,11 @@ service cloud.firestore {
   match /databases/{database}/documents {
 
     // Helper: get user role from user_roles collection (keyed by email)
+    // Defaults to 'admin' if no user_roles doc exists (bootstrap / unlisted users)
     function getUserRole() {
-      return get(/databases/$(database)/documents/user_roles/$(request.auth.token.email)).data.role;
+      return exists(/databases/$(database)/documents/user_roles/$(request.auth.token.email))
+        ? get(/databases/$(database)/documents/user_roles/$(request.auth.token.email)).data.role
+        : 'admin';
     }
 
     function isAuthenticated() {
@@ -121,6 +124,12 @@ service cloud.firestore {
     match /reconciliation_reports/{reportId} {
       allow read: if isManagerOrAdmin();
       allow write: if false; // Only Cloud Functions
+    }
+
+    // Manufacturer config - all authenticated read, only managers+ write
+    match /manufacturer_config/{manufacturerId} {
+      allow read: if isAuthenticated();
+      allow write: if isManagerOrAdmin();
     }
 
     // Prepaid credits

@@ -6,7 +6,7 @@ import * as admin from 'firebase-admin';
 import { sendForSignature, downloadSignedDocument, cancelSigningInvite, resendSigningInvite, sendSignatureReminder } from './signNowService';
 import { extractDataFromPdf } from './pdfExtractor';
 import { addDocumentToSheet, updateSheetOnSigned } from './googleSheetsService';
-import { seedAdminOptions, seedMockQuotes, seedBulkQuotes, seedTestOrders, seedPartialPaymentOrders, seedOverpaidOrders } from './seedData';
+import { seedAdminOptions, seedMockQuotes, seedBulkQuotes, seedTestOrders, seedPartialPaymentOrders, seedOverpaidOrders, seedManufacturerConfig } from './seedData';
 import {
   createPaymentIntent,
   verifyPayment,
@@ -66,6 +66,8 @@ import {
   triggerReconciliation,
   getLatestReconciliationReport,
 } from './scheduledFunctions';
+import { getAccessToken } from './signNowService';
+import axios from 'axios';
 
 admin.initializeApp();
 
@@ -156,6 +158,115 @@ export {
   triggerReconciliation,
   getLatestReconciliationReport,
 };
+
+// Get SignNow template field positions (for signature field preview)
+export const getTemplateFields = functions.https.onRequest(async (req, res) => {
+  res.set('Access-Control-Allow-Origin', '*');
+  res.set('Access-Control-Allow-Methods', 'GET, OPTIONS');
+  res.set('Access-Control-Allow-Headers', 'Content-Type');
+
+  if (req.method === 'OPTIONS') {
+    res.status(204).send('');
+    return;
+  }
+
+  const templateId = req.query.templateId as string;
+  if (!templateId) {
+    res.status(400).json({ error: 'templateId query parameter is required' });
+    return;
+  }
+
+  try {
+    const accessToken = await getAccessToken();
+    const response = await axios.get(
+      `https://api.signnow.com/document/${templateId}`,
+      { headers: { Authorization: `Bearer ${accessToken}` } }
+    );
+
+    const templateFields = (response.data.fields || []).map((field: any) => {
+      const attrs = typeof field.json_attributes === 'string'
+        ? JSON.parse(field.json_attributes)
+        : (field.json_attributes || {});
+      return {
+        type: field.type,
+        x: parseFloat(attrs.x) || 0,
+        y: parseFloat(attrs.y) || 0,
+        width: parseFloat(attrs.width) || 100,
+        height: parseFloat(attrs.height) || 30,
+        page_number: parseInt(attrs.page_number) || 0,
+        role: field.role || 'Signer 1',
+        required: attrs.required !== false,
+        label: attrs.label || field.type,
+      };
+    });
+
+    res.json({
+      fields: templateFields,
+      templateId,
+      pageCount: response.data.page_count || response.data.pages?.length || 1,
+    });
+  } catch (error: any) {
+    console.error('Error fetching template fields:', error.response?.data || error.message);
+    res.status(500).json({
+      error: error.response?.data?.message || error.message || 'Failed to fetch template fields',
+    });
+  }
+});
+
+// Preview PDF extraction — test what data Claude would extract from a PDF
+export const previewPdfExtraction = functions.runWith({ timeoutSeconds: 120, memory: '512MB' }).https.onRequest(async (req, res) => {
+  res.set('Access-Control-Allow-Origin', '*');
+  res.set('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.set('Access-Control-Allow-Headers', 'Content-Type');
+
+  if (req.method === 'OPTIONS') {
+    res.status(204).send('');
+    return;
+  }
+
+  if (req.method !== 'POST') {
+    res.status(405).json({ error: 'Method not allowed' });
+    return;
+  }
+
+  const { pdfBase64, manufacturer } = req.body;
+  if (!pdfBase64) {
+    res.status(400).json({ error: 'pdfBase64 is required' });
+    return;
+  }
+  if (!manufacturer) {
+    res.status(400).json({ error: 'manufacturer is required' });
+    return;
+  }
+
+  try {
+    const pdfBuffer = Buffer.from(pdfBase64, 'base64');
+    const extracted = await extractDataFromPdf(pdfBuffer, manufacturer);
+    res.json({
+      success: true,
+      data: {
+        customerName: extracted.customerName,
+        address: extracted.address,
+        city: extracted.city,
+        state: extracted.state,
+        zip: extracted.zip,
+        email: extracted.email,
+        phone: extracted.phone,
+        subtotal: extracted.subtotal,
+        downPayment: extracted.downPayment,
+        balanceDue: extracted.balanceDue,
+        expectedDepositPercent: extracted.expectedDepositPercent,
+        expectedDepositAmount: extracted.expectedDepositAmount,
+        actualDepositPercent: extracted.actualDepositPercent,
+        depositDiscrepancy: extracted.depositDiscrepancy,
+        depositDiscrepancyAmount: extracted.depositDiscrepancyAmount,
+      },
+    });
+  } catch (error: any) {
+    console.error('Error extracting PDF data:', error);
+    res.status(500).json({ error: error.message || 'Failed to extract data from PDF' });
+  }
+});
 
 /**
  * HTTP endpoint to sync order status from esign documents
@@ -970,6 +1081,11 @@ export const seedInitialData = functions.https.onRequest(async (req, res) => {
     if (seedType === 'admin_options' || seedType === 'all') {
       await seedAdminOptions();
       console.log('Admin options seeded');
+    }
+
+    if (seedType === 'manufacturer_config' || seedType === 'all') {
+      await seedManufacturerConfig();
+      console.log('Manufacturer config seeded');
     }
 
     if (seedType === 'quotes' || seedType === 'all') {

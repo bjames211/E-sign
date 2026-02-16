@@ -1228,53 +1228,43 @@ export const getAllLedgerEntries = functions.https.onRequest(async (req, res) =>
     const offsetParam = parseInt(req.query.offset as string) || 0;
     const includeVoided = req.query.includeVoided === 'true';
 
-    // Start with base query
+    // Build query with Firestore-level filters (much faster than fetching all + filtering in JS)
     let query: FirebaseFirestore.Query = db.collection('payment_ledger');
 
-    // Apply filters
-    // Note: Firestore has limitations on compound queries, so we filter in memory for some conditions
+    // Push status filter to Firestore
+    if (status && status !== 'all') {
+      query = query.where('status', '==', status);
+    } else if (!includeVoided) {
+      query = query.where('status', 'in', ['pending', 'verified', 'approved']);
+    }
 
-    // Get all entries first, then filter
-    const snapshot = await query.orderBy('createdAt', 'desc').get();
+    // Push date range filters to Firestore
+    if (startDateStr) {
+      const startDate = new Date(startDateStr);
+      query = query.where('createdAt', '>=', admin.firestore.Timestamp.fromDate(startDate));
+    }
+    if (endDateStr) {
+      const endDate = new Date(endDateStr);
+      endDate.setHours(23, 59, 59, 999);
+      query = query.where('createdAt', '<=', admin.firestore.Timestamp.fromDate(endDate));
+    }
+
+    // Order by createdAt (required for date range queries, good default sort)
+    query = query.orderBy('createdAt', 'desc');
+
+    const snapshot = await query.get();
 
     let entries = snapshot.docs.map((doc) => ({
       id: doc.id,
       ...doc.data(),
     })) as Array<Record<string, unknown>>;
 
-    // Filter by status
-    if (status && status !== 'all') {
-      entries = entries.filter(e => e.status === status);
-    } else if (!includeVoided) {
-      entries = entries.filter(e => e.status !== 'voided');
-    }
-
-    // Filter by transaction type
+    // Filter by transaction type in memory (avoids needing extra composite indexes)
     if (transactionType && transactionType !== 'all') {
       entries = entries.filter(e => e.transactionType === transactionType);
     }
 
-    // Filter by date range
-    if (startDateStr) {
-      const startDate = new Date(startDateStr);
-      entries = entries.filter(e => {
-        const createdAt = e.createdAt as { seconds: number } | undefined;
-        if (!createdAt?.seconds) return false;
-        return new Date(createdAt.seconds * 1000) >= startDate;
-      });
-    }
-
-    if (endDateStr) {
-      const endDate = new Date(endDateStr);
-      endDate.setHours(23, 59, 59, 999); // End of day
-      entries = entries.filter(e => {
-        const createdAt = e.createdAt as { seconds: number } | undefined;
-        if (!createdAt?.seconds) return false;
-        return new Date(createdAt.seconds * 1000) <= endDate;
-      });
-    }
-
-    // Search filter (order number, Stripe ID, payment number)
+    // Search filter in memory (Firestore doesn't support text search)
     if (search) {
       const searchLower = search.toLowerCase();
       entries = entries.filter(e => {
@@ -1298,9 +1288,10 @@ export const getAllLedgerEntries = functions.https.onRequest(async (req, res) =>
 
     // Enrich entries with customer names and order financial info
     const orderIds = [...new Set(paginatedEntries.map(e => e.orderId as string))];
-    const orderDocs = await Promise.all(
-      orderIds.map(id => db.collection('orders').doc(id).get())
-    );
+
+    // Batch fetch orders using getAll (single round-trip instead of N parallel gets)
+    const orderRefs = orderIds.map(id => db.collection('orders').doc(id));
+    const orderDocs = orderRefs.length > 0 ? await db.getAll(...orderRefs) : [];
 
     // Build initial order map and identify orders with pending_signature change orders
     const ordersWithPendingCO: string[] = [];
@@ -1310,7 +1301,6 @@ export const getAllLedgerEntries = functions.https.onRequest(async (req, res) =>
       if (doc.exists) {
         const data = doc.data();
         orderDataMap[doc.id] = data!;
-        // Only fetch change order if this order has a pending_signature CO
         if (data?.activeChangeOrderStatus === 'pending_signature') {
           ordersWithPendingCO.push(doc.id);
         }
@@ -1318,7 +1308,6 @@ export const getAllLedgerEntries = functions.https.onRequest(async (req, res) =>
     });
 
     // Only fetch change orders for orders that actually have pending_signature status
-    // This significantly reduces queries when most orders don't have pending COs
     const liveChangeOrderMap: Record<string, { deposit: number; subtotal: number }> = {};
 
     if (ordersWithPendingCO.length > 0) {
@@ -1356,7 +1345,6 @@ export const getAllLedgerEntries = functions.https.onRequest(async (req, res) =>
       const ledgerSummary = data?.ledgerSummary;
       const netReceived = ledgerSummary?.netReceived || 0;
 
-      // Check if there's a live change order (pending_signature) that supersedes the stored values
       const liveCO = liveChangeOrderMap[docId];
       const effectiveDeposit = liveCO
         ? liveCO.deposit

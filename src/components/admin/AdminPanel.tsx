@@ -1,10 +1,12 @@
 import React, { useState } from 'react';
 import { DropdownManager } from './DropdownManager';
 import { UserManagement } from './UserManagement';
+import { ManufacturerConfig } from './ManufacturerConfig';
+import { PdfExtractionTest } from './PdfExtractionTest';
 import { seedAdminOptions } from '../../services/adminService';
 import { AdminOptionType, ALL_ADMIN_OPTION_TYPES, ADMIN_OPTION_LABELS } from '../../types/admin';
 
-type AdminTab = AdminOptionType | 'users';
+type AdminTab = AdminOptionType | 'users' | 'manufacturer_config' | 'pdf_extraction';
 
 export function AdminPanel() {
   const [activeTab, setActiveTab] = useState<AdminTab>('users');
@@ -58,6 +60,24 @@ export function AdminPanel() {
           >
             Users & Roles
           </button>
+          <button
+            onClick={() => setActiveTab('manufacturer_config')}
+            style={{
+              ...styles.tab,
+              ...(activeTab === 'manufacturer_config' ? styles.activeTab : {}),
+            }}
+          >
+            Manufacturer Templates
+          </button>
+          <button
+            onClick={() => setActiveTab('pdf_extraction')}
+            style={{
+              ...styles.tab,
+              ...(activeTab === 'pdf_extraction' ? styles.activeTab : {}),
+            }}
+          >
+            Test PDF Extraction
+          </button>
           <div style={styles.tabDivider} />
           {ALL_ADMIN_OPTION_TYPES.map((type) => (
             <button
@@ -77,6 +97,10 @@ export function AdminPanel() {
         <div style={styles.panel}>
           {activeTab === 'users' ? (
             <UserManagement />
+          ) : activeTab === 'manufacturer_config' ? (
+            <ManufacturerConfig />
+          ) : activeTab === 'pdf_extraction' ? (
+            <PdfExtractionTest />
           ) : (
             <DropdownManager key={activeTab} optionType={activeTab} />
           )}

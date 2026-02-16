@@ -130,21 +130,68 @@ export interface OrderValidation {
   managerApprovedAt?: Timestamp | null;
 }
 
-// Expected deposit percentages by manufacturer
-export const DEPOSIT_PERCENTAGES: Record<string, number> = {
-  'Eagle Carports': 19,
-  'American Carports': 20,
-  'Coast to Coast Carports': 20,
+// Deposit tier type (mirrors backend DepositTier)
+export interface DepositTier {
+  upTo: number | null;
+  percent: number;
+}
+
+interface DepositConfig {
+  percent?: number | null;
+  tiers?: DepositTier[];
+}
+
+// Expected deposit configs by manufacturer (mutable — loaded from Firestore on app startup)
+let _depositConfigs: Record<string, DepositConfig> = {
+  'Eagle Carports': { percent: 19 },
+  'American Carports': { percent: 20 },
+  'Coast to Coast Carports': { percent: 20 },
 };
 
-// Helper to check deposit discrepancy
+// Backward-compatible flat lookup (returns first flat percent or null)
+export const DEPOSIT_PERCENTAGES: Record<string, number> = new Proxy({} as Record<string, number>, {
+  get: (_target, key: string) => _depositConfigs[key]?.percent ?? undefined,
+  ownKeys: () => Object.keys(_depositConfigs),
+  getOwnPropertyDescriptor: (_target, key: string) => {
+    if (key in _depositConfigs && _depositConfigs[key].percent != null) {
+      return { configurable: true, enumerable: true, value: _depositConfigs[key].percent };
+    }
+    return undefined;
+  },
+});
+
+export function setDepositConfigs(configs: Record<string, DepositConfig>): void {
+  Object.keys(_depositConfigs).forEach((k) => delete _depositConfigs[k]);
+  Object.assign(_depositConfigs, configs);
+}
+
+// Resolve deposit percent for a manufacturer at a given subtotal
+function resolveDepositPercent(manufacturer: string, subtotal: number): number | null {
+  const config = _depositConfigs[manufacturer];
+  if (!config) return null;
+  if (config.tiers && config.tiers.length > 0) {
+    const sorted = [...config.tiers].sort((a, b) => (a.upTo ?? Infinity) - (b.upTo ?? Infinity));
+    for (const tier of sorted) {
+      if (tier.upTo == null || subtotal <= tier.upTo) {
+        return tier.percent;
+      }
+    }
+    return null;
+  }
+  return config.percent ?? null;
+}
+
+// Helper to check deposit discrepancy (returns no discrepancy if no percent configured)
 export const checkDepositDiscrepancy = (
   manufacturer: string,
   subtotal: number,
   deposit: number
-): { hasDiscrepancy: boolean; expectedPercent: number; actualPercent: number; expectedDeposit: number } => {
-  const expectedPercent = DEPOSIT_PERCENTAGES[manufacturer] || 20;
+): { hasDiscrepancy: boolean; expectedPercent: number | null; actualPercent: number; expectedDeposit: number | null } => {
+  const expectedPercent = resolveDepositPercent(manufacturer, subtotal);
   const actualPercent = subtotal > 0 ? (deposit / subtotal) * 100 : 0;
+  if (expectedPercent == null) {
+    return { hasDiscrepancy: false, expectedPercent: null, actualPercent, expectedDeposit: null };
+  }
   const expectedDeposit = (subtotal * expectedPercent) / 100;
   const hasDiscrepancy = Math.abs(actualPercent - expectedPercent) > 0.5;
   return { hasDiscrepancy, expectedPercent, actualPercent, expectedDeposit };

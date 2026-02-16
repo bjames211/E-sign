@@ -246,24 +246,15 @@ export const findMissingLedgerEntries = functions.https.onRequest(async (req, re
         .get();
 
       if (ledgerQuery.empty) {
-        // Also check legacy payments collection
-        const paymentsQuery = await db
-          .collection('payments')
-          .where('stripePaymentId', '==', pi.id)
-          .limit(1)
-          .get();
-
-        if (paymentsQuery.empty) {
-          missingEntries.push({
-            stripeId: pi.id,
-            type: 'payment_intent',
-            amount: pi.amount / 100,
-            status: pi.status,
-            createdAt: new Date(pi.created * 1000),
-            orderId: pi.metadata?.orderId,
-            orderNumber: pi.metadata?.orderNumber,
-          });
-        }
+        missingEntries.push({
+          stripeId: pi.id,
+          type: 'payment_intent',
+          amount: pi.amount / 100,
+          status: pi.status,
+          createdAt: new Date(pi.created * 1000),
+          orderId: pi.metadata?.orderId,
+          orderNumber: pi.metadata?.orderNumber,
+        });
       }
     }
 

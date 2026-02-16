@@ -1,12 +1,7 @@
 import axios from 'axios';
+import { getTemplateId } from './manufacturerConfigService';
 
 const SIGNNOW_API_BASE = 'https://api.signnow.com';
-
-// Template IDs for each installer's order form
-const INSTALLER_TEMPLATES: Record<string, string> = {
-  'Eagle Carports': 'c16f3961f66f4348bf7c6bd9ece33735040b0b95',
-  'American Carports': '2e11d4ae2dd94a17a75cbe75c565763765844c85',
-};
 
 interface SignatureRequest {
   pdfBuffer: Buffer;
@@ -24,7 +19,7 @@ interface SignatureResult {
 /**
  * Get OAuth access token from SignNow
  */
-async function getAccessToken(): Promise<string> {
+export async function getAccessToken(): Promise<string> {
   const response = await axios.post(
     `${SIGNNOW_API_BASE}/oauth2/token`,
     new URLSearchParams({
@@ -268,10 +263,10 @@ export async function sendForSignature(
   console.log('To:', request.signerEmail);
   console.log('========================================\n');
 
-  // Look up template ID for this installer
-  const templateId = INSTALLER_TEMPLATES[request.installer];
+  // Look up template ID for this installer from Firestore config
+  const templateId = await getTemplateId(request.installer);
   if (!templateId) {
-    throw new Error(`No template configured for installer: ${request.installer}`);
+    throw new Error(`No SignNow template configured for installer: ${request.installer}. Please configure it in Admin > Manufacturer Templates.`);
   }
   console.log('Using template:', templateId);
 

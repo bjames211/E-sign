@@ -44,3 +44,19 @@ export const ALL_ADMIN_OPTION_TYPES: AdminOptionType[] = [
   'sales_persons',
   'states',
 ];
+
+export interface DepositTier {
+  upTo: number | null;  // max subtotal for this tier. null = "and above" (catch-all)
+  percent: number;
+}
+
+export interface ManufacturerConfig {
+  id?: string;
+  name: string;
+  signNowTemplateId: string;
+  depositPercent?: number | null;
+  depositTiers?: DepositTier[];
+  active: boolean;
+  createdAt: any;
+  updatedAt: any;
+}

@@ -108,6 +108,31 @@ export async function seedAdminOptions(): Promise<void> {
   console.log('Admin options seeded successfully');
 }
 
+// Seed manufacturer config (SignNow templates + deposit percentages)
+export async function seedManufacturerConfig(): Promise<void> {
+  const db = admin.firestore();
+  const configs = [
+    { name: 'Eagle Carports', signNowTemplateId: 'c16f3961f66f4348bf7c6bd9ece33735040b0b95', depositPercent: 19, active: true },
+    { name: 'American Carports', signNowTemplateId: '2e11d4ae2dd94a17a75cbe75c565763765844c85', depositPercent: 20, active: true },
+    { name: 'Coast to Coast Carports', signNowTemplateId: '', depositPercent: 20, active: true },
+    { name: 'American West Coast', signNowTemplateId: '', depositPercent: 20, active: true },
+    { name: 'Viking Steel Structures', signNowTemplateId: '', depositPercent: 20, active: true },
+  ];
+
+  const batch = db.batch();
+  for (const config of configs) {
+    const docId = config.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
+    batch.set(db.collection('manufacturer_config').doc(docId), {
+      ...config,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+  }
+
+  await batch.commit();
+  console.log('Manufacturer config seeded successfully');
+}
+
 // Seed mock quotes for demo
 export async function seedMockQuotes(): Promise<void> {
   const db = admin.firestore();

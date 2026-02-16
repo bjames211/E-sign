@@ -50,7 +50,7 @@ function removeUndefinedValues<T>(obj: T): T {
   return obj;
 }
 
-const PAYMENTS_COLLECTION = 'payments';
+const PAYMENTS_COLLECTION = 'payment_ledger'; // Migrated: all payment data now in payment_ledger
 const ORDERS_COLLECTION = 'orders';
 const LEDGER_COLLECTION = 'payment_ledger';
 

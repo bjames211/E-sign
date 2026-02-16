@@ -6,6 +6,7 @@ import { addDocumentToSheet } from './googleSheetsService';
 import { sendForSignature } from './signNowService';
 import { extractDataFromPdf, ExtractedPdfData } from './pdfExtractor';
 import { createLedgerEntry, updateOrderLedgerSummary } from './paymentLedgerFunctions';
+import { getDepositPercent } from './manufacturerConfigService';
 
 // Initialize Stripe
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || 'sk_test_placeholder', {
@@ -14,12 +15,6 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || 'sk_test_placeholder'
 
 // Manual payment types that require manager approval
 const MANUAL_PAYMENT_TYPES = ['check', 'wire', 'credit_on_file', 'other'];
-
-// Expected deposit percentages by installer
-const DEPOSIT_PERCENTAGES: Record<string, number> = {
-  'Eagle Carports': 19,
-  'American Carports': 20,
-};
 
 interface ValidationResult {
   valid: boolean;
@@ -158,21 +153,25 @@ async function validateOrderWithPdf(
   }
 
   // 5. CRITICAL: Check deposit percentage - requires manager approval if off
-  const expectedPercent = DEPOSIT_PERCENTAGES[orderData.building.manufacturer] || 20;
+  // Skip validation if no deposit percent is configured (variable/tiered pricing)
+  const expectedPercent = await getDepositPercent(orderData.building.manufacturer, orderData.pricing.subtotalBeforeTax);
   const actualPercent = orderData.pricing.subtotalBeforeTax > 0
     ? (orderData.pricing.deposit / orderData.pricing.subtotalBeforeTax) * 100
     : 0;
-  const percentDiff = Math.abs(actualPercent - expectedPercent);
 
-  // Very small tolerance (0.5%) for rounding - any significant difference requires manager approval
-  if (percentDiff > 0.5) {
-    requiresManagerApproval = true;
-    const expectedDeposit = (orderData.pricing.subtotalBeforeTax * expectedPercent / 100).toFixed(2);
-    errors.push(
-      `Deposit percentage is ${actualPercent.toFixed(1)}% (expected ${expectedPercent}% for ${orderData.building.manufacturer}). ` +
-      `Expected deposit: $${expectedDeposit}, Actual: $${orderData.pricing.deposit}. ` +
-      `Manager approval required.`
-    );
+  if (expectedPercent != null) {
+    const percentDiff = Math.abs(actualPercent - expectedPercent);
+
+    // Very small tolerance (0.5%) for rounding - any significant difference requires manager approval
+    if (percentDiff > 0.5) {
+      requiresManagerApproval = true;
+      const expectedDeposit = (orderData.pricing.subtotalBeforeTax * expectedPercent / 100).toFixed(2);
+      errors.push(
+        `Deposit percentage is ${actualPercent.toFixed(1)}% (expected ${expectedPercent}% for ${orderData.building.manufacturer}). ` +
+        `Expected deposit: $${expectedDeposit}, Actual: $${orderData.pricing.deposit}. ` +
+        `Manager approval required.`
+      );
+    }
   }
 
   // Also note PDF deposit discrepancy if detected (warning only, not blocking)
@@ -551,10 +550,11 @@ export const sendOrderForSignature = functions.https.onRequest(async (req, res) 
     // Validate PDF against form data using AI
     const validation = await validateOrderWithPdf(orderData, pdfBuffer);
 
-    const expectedDepositPercent = orderData.building.manufacturer.includes('Eagle') ? 19 : 20;
+    const expectedDepositPercent = await getDepositPercent(orderData.building.manufacturer, orderData.pricing.subtotalBeforeTax);
     const actualDepositPercent = orderData.pricing.subtotalBeforeTax > 0
       ? Math.round((orderData.pricing.deposit / orderData.pricing.subtotalBeforeTax) * 100)
       : 0;
+    const hasConfiguredPercent = expectedDepositPercent != null;
 
     // If validation fails and requires manager approval - save as draft with validation data
     if (validation.requiresManagerApproval && !hasManagerApproval) {
@@ -572,9 +572,9 @@ export const sendOrderForSignature = functions.https.onRequest(async (req, res) 
           warnings: validation.warnings,
           errors: validation.errors,
           depositCheck: {
-            expectedPercent: expectedDepositPercent,
+            expectedPercent: expectedDepositPercent ?? 0,
             actualPercent: actualDepositPercent,
-            isDiscrepancy: Math.abs(actualDepositPercent - expectedDepositPercent) > 1,
+            isDiscrepancy: hasConfiguredPercent ? Math.abs(actualDepositPercent - (expectedDepositPercent as number)) > 1 : false,
           },
           managerApprovalRequired: true,
           managerApprovalGiven: false,
@@ -721,9 +721,9 @@ export const sendOrderForSignature = functions.https.onRequest(async (req, res) 
         warnings: validation.warnings,
         errors: validation.errors,
         depositCheck: {
-          expectedPercent: expectedDepositPercent,
+          expectedPercent: expectedDepositPercent ?? 0,
           actualPercent: actualDepositPercent,
-          isDiscrepancy: Math.abs(actualDepositPercent - expectedDepositPercent) > 1,
+          isDiscrepancy: hasConfiguredPercent ? Math.abs(actualDepositPercent - (expectedDepositPercent as number)) > 1 : false,
         },
         managerApprovalRequired: validation.requiresManagerApproval,
         managerApprovalGiven: hasManagerApproval,
@@ -736,9 +736,11 @@ export const sendOrderForSignature = functions.https.onRequest(async (req, res) 
     // Add to Google Sheets for tracking
     try {
       const balanceDue = orderData.pricing.subtotalBeforeTax - orderData.pricing.deposit;
-      const expectedDepositPercent = orderData.building.manufacturer.includes('Eagle') ? 19 : 20;
-      const expectedDepositAmount = orderData.pricing.subtotalBeforeTax * (expectedDepositPercent / 100);
-      const actualDepositPercent = orderData.pricing.subtotalBeforeTax > 0
+      const sheetExpectedPercent = await getDepositPercent(orderData.building.manufacturer, orderData.pricing.subtotalBeforeTax);
+      const sheetExpectedAmount = sheetExpectedPercent != null
+        ? orderData.pricing.subtotalBeforeTax * (sheetExpectedPercent / 100)
+        : null;
+      const sheetActualPercent = orderData.pricing.subtotalBeforeTax > 0
         ? Math.round((orderData.pricing.deposit / orderData.pricing.subtotalBeforeTax) * 100)
         : 0;
 
@@ -757,11 +759,11 @@ export const sendOrderForSignature = functions.https.onRequest(async (req, res) 
         balanceDue,
         preSignedPdfLink: orderData.files.orderFormPdf!.downloadUrl,
         signedPdfLink: '',
-        expectedDepositPercent,
-        expectedDepositAmount,
-        actualDepositPercent,
-        depositDiscrepancy: Math.abs(actualDepositPercent - expectedDepositPercent) > 1,
-        depositDiscrepancyAmount: Math.abs(orderData.pricing.deposit - expectedDepositAmount),
+        expectedDepositPercent: sheetExpectedPercent ?? 0,
+        expectedDepositAmount: sheetExpectedAmount ?? 0,
+        actualDepositPercent: sheetActualPercent,
+        depositDiscrepancy: sheetExpectedPercent != null ? Math.abs(sheetActualPercent - sheetExpectedPercent) > 1 : false,
+        depositDiscrepancyAmount: sheetExpectedAmount != null ? Math.abs(orderData.pricing.deposit - sheetExpectedAmount) : 0,
       });
       console.log('Added order to Google Sheets for tracking');
     } catch (sheetError) {
@@ -1177,32 +1179,30 @@ export const sendChangeOrderForSignature = functions.https.onRequest(async (req,
       const depositDiff = paymentInfo.depositDifference;
 
       if (paymentInfo.isRefund) {
-        // Deposit decreased - create pending refund record
-        console.log(`Creating refund payment record for -$${depositDiff}`);
-        const refundRecord = {
+        // Deposit decreased - create pending refund ledger entry
+        console.log(`Creating refund ledger entry for -$${depositDiff}`);
+        const { entryId } = await createLedgerEntry({
           orderId: changeOrderData.orderId,
           orderNumber: orderData.orderNumber,
           changeOrderId: changeOrderId,
           changeOrderNumber: changeOrderData.changeOrderNumber,
-          amount: -depositDiff, // Negative for refund
-          method: 'other' as const,
-          category: 'refund' as const,
-          status: 'pending' as const,
+          transactionType: 'refund',
+          amount: depositDiff,
+          method: 'other',
+          category: 'refund',
+          status: 'pending',
           description: `Refund due from ${changeOrderData.changeOrderNumber} - deposit decrease`,
-          createdAt: admin.firestore.FieldValue.serverTimestamp(),
-          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
           createdBy: changeOrderData.createdBy || 'system',
-        };
-        const refundRef = await db.collection('payments').add(refundRecord);
-        paymentRecordId = refundRef.id;
+        }, db);
+        paymentRecordId = entryId;
         paymentStatus = 'refund_pending';
         refundDue = depositDiff;
-        console.log(`Created refund payment record: ${paymentRecordId}`);
+        await updateOrderLedgerSummary(changeOrderData.orderId, db);
+        console.log(`Created refund ledger entry: ${paymentRecordId}`);
       } else if (paymentInfo.collectNow) {
         // Deposit increased and collecting now
-        console.log(`Creating payment record for collected $${depositDiff}`);
+        console.log(`Creating collected payment ledger entry for $${depositDiff}`);
 
-        // Map paymentType to method for storage
         const paymentTypeToMethod: Record<string, string> = {
           'stripe_charge_card': 'stripe',
           'stripe_pay_now': 'stripe',
@@ -1214,59 +1214,48 @@ export const sendChangeOrderForSignature = functions.https.onRequest(async (req,
         };
         const method = paymentTypeToMethod[paymentInfo.paymentType || 'stripe'] || 'stripe';
         const isStripePayment = paymentInfo.paymentType === 'stripe_already_paid' || paymentInfo.paymentType === 'stripe_pay_now' || paymentInfo.paymentType === 'stripe_charge_card';
-        const isManualPayment = ['check', 'wire', 'credit_on_file', 'other'].includes(paymentInfo.paymentType || '');
 
-        const paymentRecord: any = {
+        const { entryId } = await createLedgerEntry({
           orderId: changeOrderData.orderId,
           orderNumber: orderData.orderNumber,
           changeOrderId: changeOrderId,
           changeOrderNumber: changeOrderData.changeOrderNumber,
+          transactionType: 'payment',
           amount: depositDiff,
-          method: method,
-          category: 'change_order_deposit' as const,
+          method: method as any,
+          category: 'change_order_adjustment',
           status: isStripePayment ? 'verified' : 'approved',
+          stripePaymentId: isStripePayment && paymentInfo.stripePaymentId ? paymentInfo.stripePaymentId : undefined,
+          stripeVerified: isStripePayment && paymentInfo.stripePaymentId ? true : undefined,
           description: `Additional deposit for ${changeOrderData.changeOrderNumber}`,
-          createdAt: admin.firestore.FieldValue.serverTimestamp(),
-          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+          approvedBy: !isStripePayment ? 'Manager' : undefined,
           createdBy: changeOrderData.createdBy || 'system',
-        };
-
-        if (isStripePayment && paymentInfo.stripePaymentId) {
-          paymentRecord.stripePaymentId = paymentInfo.stripePaymentId;
-          paymentRecord.stripeVerified = true;
-        }
-
-        if (isManualPayment) {
-          paymentRecord.approvedBy = 'Manager';
-          paymentRecord.approvedAt = admin.firestore.FieldValue.serverTimestamp();
-        }
-
-        const paymentRef = await db.collection('payments').add(paymentRecord);
-        paymentRecordId = paymentRef.id;
+        }, db);
+        paymentRecordId = entryId;
         paymentStatus = 'collected';
-        console.log(`Created collected payment record: ${paymentRecordId}`);
+        await updateOrderLedgerSummary(changeOrderData.orderId, db);
+        console.log(`Created collected ledger entry: ${paymentRecordId}`);
       } else {
         // Deposit increased but collecting later - create pending record
-        console.log(`Creating pending payment record for $${depositDiff}`);
-        const pendingRecord = {
+        console.log(`Creating pending payment ledger entry for $${depositDiff}`);
+        const { entryId } = await createLedgerEntry({
           orderId: changeOrderData.orderId,
           orderNumber: orderData.orderNumber,
           changeOrderId: changeOrderId,
           changeOrderNumber: changeOrderData.changeOrderNumber,
+          transactionType: 'payment',
           amount: depositDiff,
-          method: 'other' as const,
-          category: 'change_order_deposit' as const,
-          status: 'pending' as const,
+          method: 'other',
+          category: 'change_order_adjustment',
+          status: 'pending',
           description: `Additional deposit pending for ${changeOrderData.changeOrderNumber}`,
-          createdAt: admin.firestore.FieldValue.serverTimestamp(),
-          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
           createdBy: changeOrderData.createdBy || 'system',
-        };
-        const pendingRef = await db.collection('payments').add(pendingRecord);
-        paymentRecordId = pendingRef.id;
+        }, db);
+        paymentRecordId = entryId;
         paymentStatus = 'pending';
         additionalDepositDue = depositDiff;
-        console.log(`Created pending payment record: ${paymentRecordId}`);
+        await updateOrderLedgerSummary(changeOrderData.orderId, db);
+        console.log(`Created pending ledger entry: ${paymentRecordId}`);
       }
     }
 
@@ -1502,7 +1491,7 @@ export const sendChangeOrderForSignature = functions.https.onRequest(async (req,
 
     // Create new esign_documents record with updated data
     const customerName = `${finalCustomerData.firstName} ${finalCustomerData.lastName}`.trim();
-    const expectedDepositPercent = finalBuildingData.manufacturer.includes('Eagle') ? 19 : 20;
+    const expectedDepositPercent = await getDepositPercent(finalBuildingData.manufacturer, newPricing.subtotalBeforeTax);
     const actualDepositPercent = newPricing.subtotalBeforeTax > 0
       ? Math.round((newPricing.deposit / newPricing.subtotalBeforeTax) * 100)
       : 0;
