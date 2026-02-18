@@ -110,30 +110,9 @@ export function OrderCard({ order, onClick, onApprovePayment, effectiveCOValues 
   } else {
     // Legacy calculation (for orders not yet migrated to ledger)
     depositRequired = order.pricing?.deposit || 0;
-    const originalDeposit = order.originalPricing?.deposit || depositRequired;
 
-    // Check if customer has paid their initial deposit
-    const hasPaidInitialDeposit = paymentStatus === 'paid' || paymentStatus === 'manually_approved';
-
-    // Get payment summary total (may only have adjustments/refunds, not original payment)
-    const summaryTotal = order.paymentSummary?.totalPaid ?? 0;
-
-    if (hasPaidInitialDeposit) {
-      // Customer paid their deposit
-      if (summaryTotal <= 0) {
-        // Summary only has refunds (original Stripe payment not in payments collection)
-        totalPaid = originalDeposit + summaryTotal;
-      } else if (summaryTotal < originalDeposit) {
-        // Summary has some payments but less than original - likely adjustments only
-        totalPaid = originalDeposit + summaryTotal;
-      } else {
-        // Summary includes the full payment history
-        totalPaid = summaryTotal;
-      }
-    } else {
-      // Not marked as paid - just use summary
-      totalPaid = summaryTotal;
-    }
+    // Use paymentSummary.totalPaid directly — it already reflects all recorded payments
+    totalPaid = order.paymentSummary?.totalPaid ?? 0;
 
     // Add test payment amount if in test mode
     if (order.isTestMode && order.testPaymentAmount !== undefined && order.testPaymentAmount > 0) {

@@ -77,7 +77,11 @@ async function uploadProofFile(
   };
 }
 
-// Create a new payment record
+/**
+ * @deprecated Use addLedgerEntry() instead, which goes through Cloud Functions
+ * for proper payment number generation and audit trail.
+ * This function writes directly to Firestore, bypassing server-side validation.
+ */
 export async function createPaymentRecord(
   orderId: string,
   orderNumber: string,
@@ -117,6 +121,7 @@ export async function createPaymentRecord(
   const paymentRecord: Record<string, unknown> = {
     orderId,
     orderNumber,
+    transactionType: data.amount < 0 || data.category === 'refund' ? 'refund' : 'payment',
     amount: data.amount,
     method: data.method,
     category: data.category,
@@ -165,6 +170,13 @@ export async function createPaymentRecord(
 
   // Update order's payment summary
   await updateOrderPaymentSummary(orderId);
+
+  // Also update ledgerSummary so both cache fields stay in sync
+  try {
+    await recalculateLedgerSummary(orderId);
+  } catch (err) {
+    console.warn('Failed to recalculate ledger summary (server may be unavailable):', err);
+  }
 
   return {
     id: docRef.id,
@@ -242,9 +254,19 @@ export async function updatePaymentStatus(
   // Update order's payment summary
   const payment = paymentSnap.data() as PaymentRecord;
   await updateOrderPaymentSummary(payment.orderId);
+
+  // Also update ledgerSummary so both cache fields stay in sync
+  try {
+    await recalculateLedgerSummary(payment.orderId);
+  } catch (err) {
+    console.warn('Failed to recalculate ledger summary (server may be unavailable):', err);
+  }
 }
 
-// Approve a manual payment
+/**
+ * @deprecated Use approveLedgerEntry Cloud Function endpoint instead.
+ * This function writes directly to Firestore without updating ledgerSummary.
+ */
 export async function approvePayment(
   paymentId: string,
   approvedBy: string,
@@ -278,6 +300,13 @@ export async function approvePayment(
 
   // Update order's payment summary
   await updateOrderPaymentSummary(payment.orderId);
+
+  // Also update ledgerSummary so both cache fields stay in sync
+  try {
+    await recalculateLedgerSummary(payment.orderId);
+  } catch (err) {
+    console.warn('Failed to recalculate ledger summary (server may be unavailable):', err);
+  }
 }
 
 // Reject a payment
@@ -309,6 +338,13 @@ export async function rejectPayment(
 
   // Update order's payment summary
   await updateOrderPaymentSummary(payment.orderId);
+
+  // Also update ledgerSummary so both cache fields stay in sync
+  try {
+    await recalculateLedgerSummary(payment.orderId);
+  } catch (err) {
+    console.warn('Failed to recalculate ledger summary (server may be unavailable):', err);
+  }
 }
 
 // Cancel a payment
@@ -338,9 +374,20 @@ export async function cancelPayment(
 
   // Update order's payment summary
   await updateOrderPaymentSummary(payment.orderId);
+
+  // Also update ledgerSummary so both cache fields stay in sync
+  try {
+    await recalculateLedgerSummary(payment.orderId);
+  } catch (err) {
+    console.warn('Failed to recalculate ledger summary (server may be unavailable):', err);
+  }
 }
 
-// Update order's payment summary (denormalized for quick access)
+/**
+ * @deprecated Use recalculateLedgerSummary() instead, which goes through Cloud Functions
+ * and updates ledgerSummary (not paymentSummary). This function writes to a different
+ * field than the server-side functions, causing data inconsistency.
+ */
 export async function updateOrderPaymentSummary(orderId: string): Promise<PaymentSummary> {
   const payments = await getPaymentsForOrder(orderId);
 
@@ -452,6 +499,13 @@ export async function updateStripeVerification(
   // Update order's payment summary
   const payment = paymentSnap.data() as PaymentRecord;
   await updateOrderPaymentSummary(payment.orderId);
+
+  // Also update ledgerSummary so both cache fields stay in sync
+  try {
+    await recalculateLedgerSummary(payment.orderId);
+  } catch (err) {
+    console.warn('Failed to recalculate ledger summary (server may be unavailable):', err);
+  }
 }
 
 // Migrate existing order payment to payment record (for backward compatibility)

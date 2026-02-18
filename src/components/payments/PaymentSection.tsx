@@ -77,9 +77,12 @@ export function PaymentSection({ order, onRefresh }: PaymentSectionProps) {
         let totalRefunded = 0;
         for (const e of entries) {
           if (e.status === 'voided') continue;
-          if (e.transactionType === 'refund') {
+          // Determine effective transaction type: use transactionType if present,
+          // otherwise infer from category (legacy entries may lack transactionType)
+          const effectiveType = e.transactionType || (e.category === 'refund' ? 'refund' : 'payment');
+          if (effectiveType === 'refund') {
             if (e.status === 'verified' || e.status === 'approved') totalRefunded += e.amount;
-          } else if (e.transactionType === 'payment') {
+          } else if (effectiveType === 'payment') {
             if (e.status === 'verified' || e.status === 'approved') totalPaid += e.amount;
             else if (e.status === 'pending') totalPending += e.amount;
           }
