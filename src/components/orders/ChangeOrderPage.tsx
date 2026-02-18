@@ -15,6 +15,7 @@ import {
 } from '../../types/changeOrder';
 import { AdminOptionType } from '../../types/admin';
 import { getAllAdminOptions } from '../../services/adminService';
+import { getActiveManufacturerConfigs } from '../../services/manufacturerConfigService';
 import { getOrder } from '../../services/orderService';
 import {
   getChangeOrder,
@@ -174,6 +175,13 @@ export function ChangeOrderPage({
     try {
       const options = await getAllAdminOptions();
       setAdminOptions(options);
+
+      // Override manufacturers from manufacturer_config (single source of truth)
+      const configs = await getActiveManufacturerConfigs();
+      const manufacturerNames = configs.map(c => c.name).sort();
+      if (manufacturerNames.length > 0) {
+        setAdminOptions(prev => ({ ...prev, manufacturers: manufacturerNames }));
+      }
     } catch (err) {
       console.error('Failed to load admin options:', err);
     } finally {

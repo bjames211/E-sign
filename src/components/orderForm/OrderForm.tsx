@@ -15,6 +15,7 @@ import {
 } from '../../types/order';
 import { AdminOptionType } from '../../types/admin';
 import { getAllAdminOptions } from '../../services/adminService';
+import { getActiveManufacturerConfigs } from '../../services/manufacturerConfigService';
 import { createOrder } from '../../services/orderService';
 import { useAuth } from '../../contexts/AuthContext';
 
@@ -68,6 +69,13 @@ export function OrderForm({ onOrderCreated }: OrderFormProps) {
     try {
       const options = await getAllAdminOptions();
       setAdminOptions(options);
+
+      // Override manufacturers from manufacturer_config (single source of truth)
+      const configs = await getActiveManufacturerConfigs();
+      const manufacturerNames = configs.map(c => c.name).sort();
+      if (manufacturerNames.length > 0) {
+        setAdminOptions(prev => ({ ...prev, manufacturers: manufacturerNames }));
+      }
     } catch (err) {
       console.error('Failed to load admin options:', err);
       setError('Failed to load form options. Please refresh the page.');

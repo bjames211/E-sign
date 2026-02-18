@@ -79,7 +79,7 @@ export function AdminPanel() {
             Test PDF Extraction
           </button>
           <div style={styles.tabDivider} />
-          {ALL_ADMIN_OPTION_TYPES.map((type) => (
+          {ALL_ADMIN_OPTION_TYPES.filter(type => type !== 'manufacturers').map((type) => (
             <button
               key={type}
               onClick={() => setActiveTab(type)}
