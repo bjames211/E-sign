@@ -1537,10 +1537,9 @@ export function OrderDetails({
               Approve Payment
             </button>
           )}
-          {/* Cancel Order button - show for non-draft, non-cancelled orders */}
+          {/* Cancel Order button - show for draft and sent_for_signature orders */}
           {onCancelOrder &&
-           order.status !== 'draft' &&
-           order.status !== 'cancelled' && (
+           (order.status === 'draft' || order.status === 'sent_for_signature') && (
             <button
               onClick={() => setShowCancelOrderModal(true)}
               style={styles.cancelOrderButton}
