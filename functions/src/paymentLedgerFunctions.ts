@@ -81,6 +81,8 @@ interface AddLedgerEntryRequest {
   notes?: string;
   proofFile?: PaymentProofFile;
   approvalCode?: string;
+  approvedByEmail?: string;
+  approvedByRole?: string;
   createdBy: string;
 }
 
@@ -538,12 +540,31 @@ export const addLedgerEntry = functions.https.onRequest(async (req, res) => {
       }
     }
 
-    // For manual payments with approval code, auto-approve
+    // For manual payments, auto-approve if manager/admin role or valid approval code
     const manualMethods = ['check', 'wire', 'credit_on_file', 'cash', 'other'];
-    if (manualMethods.includes(data.method) && data.approvalCode) {
-      if (isValidApprovalCode(data.approvalCode)) {
-        status = 'approved';
+    if (manualMethods.includes(data.method)) {
+      let autoApproved = false;
+
+      // Check manager/admin role
+      if (data.approvedByEmail && (data.approvedByRole === 'manager' || data.approvedByRole === 'admin')) {
+        const roleSnap = await db.collection('user_roles').where('email', '==', data.approvedByEmail).limit(1).get();
+        if (!roleSnap.empty) {
+          const roleData = roleSnap.docs[0].data();
+          if (roleData.role === 'manager' || roleData.role === 'admin') {
+            autoApproved = true;
+            approvedBy = data.approvedByEmail;
+          }
+        }
+      }
+
+      // Fall back to approval code
+      if (!autoApproved && data.approvalCode && isValidApprovalCode(data.approvalCode)) {
+        autoApproved = true;
         approvedBy = data.createdBy;
+      }
+
+      if (autoApproved) {
+        status = 'approved';
       }
     }
 
@@ -706,22 +727,41 @@ export const approveLedgerEntry = functions.https.onRequest(async (req, res) => 
 
   try {
     const db = admin.firestore();
-    const { entryId, approvalCode, approvedBy, stripePaymentId, proofFile } = req.body;
+    const { entryId, approvalCode, approvedBy, approvedByEmail, approvedByRole, stripePaymentId, proofFile } = req.body;
 
     if (!entryId) {
       res.status(400).json({ error: 'entryId is required' });
       return;
     }
 
-    if (!approvalCode) {
-      res.status(400).json({ error: 'approvalCode is required' });
-      return;
+    // Allow approval if user is a manager/admin (verified via user_roles collection)
+    // OR if they provide a valid approval code
+    let isAuthorized = false;
+    let resolvedApprovedBy = approvedBy || 'Manager';
+
+    if (approvedByEmail && (approvedByRole === 'manager' || approvedByRole === 'admin')) {
+      // Verify the role claim against user_roles collection
+      const roleSnap = await db.collection('user_roles').where('email', '==', approvedByEmail).limit(1).get();
+      if (!roleSnap.empty) {
+        const roleData = roleSnap.docs[0].data();
+        if (roleData.role === 'manager' || roleData.role === 'admin') {
+          isAuthorized = true;
+          resolvedApprovedBy = approvedByEmail;
+        }
+      }
     }
 
-    // Verify approval code
-    if (!isValidApprovalCode(approvalCode)) {
-      res.status(403).json({ error: 'Invalid approval code' });
-      return;
+    if (!isAuthorized) {
+      // Fall back to approval code
+      if (!approvalCode) {
+        res.status(400).json({ error: 'Manager login or approval code is required' });
+        return;
+      }
+      if (!isValidApprovalCode(approvalCode)) {
+        res.status(403).json({ error: 'Invalid approval code' });
+        return;
+      }
+      resolvedApprovedBy = approvedBy || 'Manager (code)';
     }
 
     // Get the entry
@@ -743,7 +783,7 @@ export const approveLedgerEntry = functions.https.onRequest(async (req, res) => 
     // Build update data
     const updateData: Record<string, unknown> = {
       status: 'approved',
-      approvedBy: approvedBy || 'Manager',
+      approvedBy: resolvedApprovedBy,
       approvedAt: admin.firestore.FieldValue.serverTimestamp(),
     };
 
@@ -853,22 +893,38 @@ export const approveLegacyPayment = functions.https.onRequest(async (req, res) =
 
   try {
     const db = admin.firestore();
-    const { orderId, orderNumber, approvalCode, approvedBy, method, amount, proofFile } = req.body;
+    const { orderId, orderNumber, approvalCode, approvedBy, approvedByEmail, approvedByRole, method, amount, proofFile } = req.body;
 
     if (!orderId && !orderNumber) {
       res.status(400).json({ error: 'orderId or orderNumber is required' });
       return;
     }
 
-    if (!approvalCode) {
-      res.status(400).json({ error: 'approvalCode is required' });
-      return;
+    // Allow approval if user is a manager/admin OR has valid approval code
+    let isAuthorized = false;
+    let resolvedApprovedBy = approvedBy || 'Manager';
+
+    if (approvedByEmail && (approvedByRole === 'manager' || approvedByRole === 'admin')) {
+      const roleSnap = await db.collection('user_roles').where('email', '==', approvedByEmail).limit(1).get();
+      if (!roleSnap.empty) {
+        const roleData = roleSnap.docs[0].data();
+        if (roleData.role === 'manager' || roleData.role === 'admin') {
+          isAuthorized = true;
+          resolvedApprovedBy = approvedByEmail;
+        }
+      }
     }
 
-    // Verify approval code
-    if (!isValidApprovalCode(approvalCode)) {
-      res.status(403).json({ error: 'Invalid approval code' });
-      return;
+    if (!isAuthorized) {
+      if (!approvalCode) {
+        res.status(400).json({ error: 'Manager login or approval code is required' });
+        return;
+      }
+      if (!isValidApprovalCode(approvalCode)) {
+        res.status(403).json({ error: 'Invalid approval code' });
+        return;
+      }
+      resolvedApprovedBy = approvedBy || 'Manager (code)';
     }
 
     // Find the order
@@ -928,15 +984,15 @@ export const approveLegacyPayment = functions.https.onRequest(async (req, res) =
       category: 'initial_deposit',
       status: 'approved',
       description: `Initial deposit (${paymentMethod.replace(/_/g, ' ')})`,
-      createdBy: approvedBy || 'Manager',
-      approvedBy: approvedBy || 'Manager',
+      createdBy: resolvedApprovedBy,
+      approvedBy: resolvedApprovedBy,
       ...(proofFile && { proofFile }),
     }, db);
 
     // Update the order's payment status + check if ready for manufacturer
     const legacyUpdateData: Record<string, unknown> = {
       'payment.status': 'manually_approved',
-      'payment.approvedBy': approvedBy || 'Manager',
+      'payment.approvedBy': resolvedApprovedBy,
       'payment.approvedAt': admin.firestore.FieldValue.serverTimestamp(),
       paidAt: admin.firestore.FieldValue.serverTimestamp(),
     };

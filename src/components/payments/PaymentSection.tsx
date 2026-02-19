@@ -16,6 +16,7 @@ import { PaymentHistoryTable } from './PaymentHistoryTable';
 import { AddPaymentModal } from './AddPaymentModal';
 import { ApprovePaymentModal } from './ApprovePaymentModal';
 import { PaymentReconciliation } from './PaymentReconciliation';
+import { useAuth } from '../../contexts/AuthContext';
 
 interface PaymentSectionProps {
   order: Order;
@@ -24,6 +25,7 @@ interface PaymentSectionProps {
 }
 
 export function PaymentSection({ order, onRefresh, readOnly = false }: PaymentSectionProps) {
+  const { user, userRole } = useAuth();
   const [payments, setPayments] = useState<PaymentRecord[]>([]);
   const [ledgerEntries, setLedgerEntries] = useState<PaymentLedgerEntry[]>([]);
   const [summary, setSummary] = useState<PaymentSummary | null>(null);
@@ -223,8 +225,10 @@ export function PaymentSection({ order, onRefresh, readOnly = false }: PaymentSe
             body: JSON.stringify({
               orderId: order.id,
               orderNumber: order.orderNumber,
-              approvalCode,
-              approvedBy: 'Manager',
+              approvalCode: approvalCode || undefined,
+              approvedBy: user?.email || 'Manager',
+              approvedByEmail: user?.email,
+              approvedByRole: userRole,
               method: method || order.payment?.type,
               amount: order.pricing?.deposit || 0,
               proofFile,
@@ -254,8 +258,10 @@ export function PaymentSection({ order, onRefresh, readOnly = false }: PaymentSe
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             paymentId,
-            approvalCode,
-            approvedBy: 'Manager',
+            approvalCode: approvalCode || undefined,
+            approvedBy: user?.email || 'Manager',
+            approvedByEmail: user?.email,
+            approvedByRole: userRole,
             method,
             stripePaymentId,
             proofFile,

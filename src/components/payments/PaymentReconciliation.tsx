@@ -14,6 +14,7 @@ import { DepositRequirementCard } from './DepositRequirementCard';
 import { MoneyReceivedSection } from './MoneyReceivedSection';
 import { RefundsSection } from './RefundsSection';
 import { BalanceCard } from './BalanceCard';
+import { useAuth } from '../../contexts/AuthContext';
 
 interface PaymentReconciliationProps {
   order: Order;
@@ -33,6 +34,7 @@ export function PaymentReconciliation({
   onRefresh,
 }: PaymentReconciliationProps) {
   void _order; // kept in interface for future use
+  const { user, userRole, isManager } = useAuth();
   const [error, setError] = useState<string | null>(null);
   const [approvingId, setApprovingId] = useState<string | null>(null);
   const [approvalCode, setApprovalCode] = useState<string>('');
@@ -50,7 +52,9 @@ export function PaymentReconciliation({
   };
 
   const handleApproveConfirm = async () => {
-    if (!showApprovalModal || !approvalCode || !showApprovalModal.id) return;
+    if (!showApprovalModal || !showApprovalModal.id) return;
+    // Require approval code only if not a manager
+    if (!isManager && !approvalCode) return;
 
     setApprovingId(showApprovalModal.id);
     setError(null);
@@ -63,8 +67,10 @@ export function PaymentReconciliation({
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             entryId: showApprovalModal.id,
-            approvalCode,
-            approvedBy: 'Manager',
+            approvalCode: isManager ? undefined : approvalCode,
+            approvedBy: user?.email || 'Manager',
+            approvedByEmail: user?.email,
+            approvedByRole: userRole,
           }),
         }
       );
@@ -182,17 +188,25 @@ export function PaymentReconciliation({
                   View Proof
                 </button>
               )}
-              <div style={styles.modalField}>
-                <label style={styles.modalLabel}>Manager Approval Code</label>
-                <input
-                  type="password"
-                  value={approvalCode}
-                  onChange={(e) => setApprovalCode(e.target.value)}
-                  style={styles.modalInput}
-                  placeholder="Enter approval code"
-                  autoFocus
-                />
-              </div>
+              {isManager ? (
+                <div style={styles.modalField}>
+                  <span style={{ fontSize: '13px', color: '#2e7d32' }}>
+                    Approving as {user?.email}
+                  </span>
+                </div>
+              ) : (
+                <div style={styles.modalField}>
+                  <label style={styles.modalLabel}>Manager Approval Code</label>
+                  <input
+                    type="password"
+                    value={approvalCode}
+                    onChange={(e) => setApprovalCode(e.target.value)}
+                    style={styles.modalInput}
+                    placeholder="Enter approval code"
+                    autoFocus
+                  />
+                </div>
+              )}
             </div>
             <div style={styles.modalActions}>
               <button
@@ -203,7 +217,7 @@ export function PaymentReconciliation({
               </button>
               <button
                 onClick={handleApproveConfirm}
-                disabled={!approvalCode || approvingId === showApprovalModal.id}
+                disabled={(!isManager && !approvalCode) || approvingId === showApprovalModal.id}
                 style={styles.confirmButton}
               >
                 {approvingId === showApprovalModal.id ? 'Approving...' : 'Approve'}

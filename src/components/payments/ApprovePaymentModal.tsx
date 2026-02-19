@@ -8,6 +8,7 @@ import {
   formatCurrency,
   requiresManualApproval,
 } from '../../types/payment';
+import { useAuth } from '../../contexts/AuthContext';
 
 interface ApprovePaymentModalProps {
   payment: PaymentRecord;
@@ -28,6 +29,7 @@ export function ApprovePaymentModal({
   onApprove,
   onClose,
 }: ApprovePaymentModalProps) {
+  const { user, isManager } = useAuth();
   const [method, setMethod] = useState<PaymentMethod>(payment.method || 'check');
   const [approvalCode, setApprovalCode] = useState('');
   const [stripePaymentId, setStripePaymentId] = useState('');
@@ -125,7 +127,7 @@ export function ApprovePaymentModal({
     setError(null);
 
     // Validation
-    if (!approvalCode.trim()) {
+    if (!isManager && !approvalCode.trim()) {
       setError('Please enter a manager approval code');
       return;
     }
@@ -275,17 +277,25 @@ export function ApprovePaymentModal({
             </div>
           )}
 
-          {/* Manager Approval Code */}
-          <div style={styles.field}>
-            <label style={styles.label}>Manager Approval Code *</label>
-            <input
-              type="password"
-              value={approvalCode}
-              onChange={(e) => setApprovalCode(e.target.value)}
-              style={styles.input}
-              placeholder="Enter approval code"
-            />
-          </div>
+          {/* Manager Approval */}
+          {isManager ? (
+            <div style={styles.field}>
+              <span style={{ fontSize: '13px', color: '#2e7d32' }}>
+                Approving as {user?.email}
+              </span>
+            </div>
+          ) : (
+            <div style={styles.field}>
+              <label style={styles.label}>Manager Approval Code *</label>
+              <input
+                type="password"
+                value={approvalCode}
+                onChange={(e) => setApprovalCode(e.target.value)}
+                style={styles.input}
+                placeholder="Enter approval code"
+              />
+            </div>
+          )}
 
           {/* Actions */}
           <div style={styles.actions}>

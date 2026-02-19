@@ -220,22 +220,38 @@ export const approvePaymentRecord = functions.https.onRequest(async (req, res) =
 
   try {
     const db = admin.firestore();
-    const { paymentId, approvalCode, approvedBy, notes, method, stripePaymentId, proofFile } = req.body as ApprovePaymentRequest;
+    const { paymentId, approvalCode, approvedBy, approvedByEmail, approvedByRole, notes, method, stripePaymentId, proofFile } = req.body as ApprovePaymentRequest & { approvedByEmail?: string; approvedByRole?: string };
 
     if (!paymentId) {
       res.status(400).json({ error: 'paymentId is required' });
       return;
     }
 
-    if (!approvalCode) {
-      res.status(400).json({ error: 'approvalCode is required' });
-      return;
+    // Allow approval if user is a manager/admin OR has valid approval code
+    let isAuthorized = false;
+    let resolvedApprovedBy = approvedBy || 'Manager';
+
+    if (approvedByEmail && (approvedByRole === 'manager' || approvedByRole === 'admin')) {
+      const roleSnap = await db.collection('user_roles').where('email', '==', approvedByEmail).limit(1).get();
+      if (!roleSnap.empty) {
+        const roleData = roleSnap.docs[0].data();
+        if (roleData.role === 'manager' || roleData.role === 'admin') {
+          isAuthorized = true;
+          resolvedApprovedBy = approvedByEmail;
+        }
+      }
     }
 
-    // Verify manager approval code
-    if (!isValidApprovalCode(approvalCode)) {
-      res.status(403).json({ error: 'Invalid manager approval code' });
-      return;
+    if (!isAuthorized) {
+      if (!approvalCode) {
+        res.status(400).json({ error: 'Manager login or approval code is required' });
+        return;
+      }
+      if (!isValidApprovalCode(approvalCode)) {
+        res.status(403).json({ error: 'Invalid manager approval code' });
+        return;
+      }
+      resolvedApprovedBy = approvedBy || 'Manager (code)';
     }
 
     // Get ledger entry
@@ -262,7 +278,7 @@ export const approvePaymentRecord = functions.https.onRequest(async (req, res) =
     // Update ledger entry
     const updateData: Record<string, unknown> = {
       status: newStatus,
-      approvedBy: approvedBy || 'Manager',
+      approvedBy: resolvedApprovedBy,
       approvedAt: admin.firestore.FieldValue.serverTimestamp(),
     };
 
