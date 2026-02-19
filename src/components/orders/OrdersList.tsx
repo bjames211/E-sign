@@ -2,9 +2,10 @@ import React, { useState, useEffect } from 'react';
 import { OrderCard } from './OrderCard';
 import { OrderDetails } from './OrderDetails';
 import { Order, OrderStatus } from '../../types/order';
-import { getOrdersPaginated, deleteOrder } from '../../services/orderService';
+import { getOrdersPaginated, deleteOrder, cancelOrder } from '../../services/orderService';
 import { getChangeOrdersForOrder } from '../../services/changeOrderService';
 import { QueryDocumentSnapshot, DocumentData } from 'firebase/firestore';
+import { useAuth } from '../../contexts/AuthContext';
 
 const PAGE_SIZE = 50;
 
@@ -15,6 +16,7 @@ const STATUS_FILTERS: { value: OrderStatus | 'all'; label: string }[] = [
   { value: 'sent_for_signature', label: 'Awaiting Signature' },
   { value: 'signed', label: 'Signed' },
   { value: 'ready_for_manufacturer', label: 'Ready for Manufacturer' },
+  { value: 'cancelled', label: 'Cancelled' },
 ];
 
 interface OrdersListProps {
@@ -31,6 +33,7 @@ interface EffectiveCOValues {
 }
 
 export function OrdersList({ onNavigateToChangeOrder, initialOrderNumber, onInitialOrderHandled }: OrdersListProps) {
+  const { user } = useAuth();
   const [orders, setOrders] = useState<Order[]>([]);
   const [filteredOrders, setFilteredOrders] = useState<Order[]>([]);
   const [loading, setLoading] = useState(true);
@@ -247,6 +250,12 @@ export function OrdersList({ onNavigateToChangeOrder, initialOrderNumber, onInit
     await loadOrders();
   };
 
+  const handleCancelOrder = async (orderId: string, reason: string) => {
+    await cancelOrder(orderId, reason, user?.uid || 'unknown', user?.email || 'unknown');
+    await loadOrders();
+    setSelectedOrder(null);
+  };
+
   const handleApprovePaymentFromCard = (orderId: string) => {
     const order = orders.find((o) => o.id === orderId);
     if (order) {
@@ -288,6 +297,7 @@ export function OrdersList({ onNavigateToChangeOrder, initialOrderNumber, onInit
       sent_for_signature: 0,
       signed: 0,
       ready_for_manufacturer: 0,
+      cancelled: 0,
     };
 
     orders.forEach((order) => {
@@ -398,6 +408,7 @@ export function OrdersList({ onNavigateToChangeOrder, initialOrderNumber, onInit
           onClose={handleCloseDetails}
           onSendForSignature={handleSendForSignature}
           onDelete={handleDelete}
+          onCancelOrder={handleCancelOrder}
           onCancelSignature={handleCancelSignature}
           openWithPaymentApproval={openWithPaymentApproval}
           onRefresh={loadOrders}

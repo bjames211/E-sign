@@ -41,6 +41,7 @@ interface OrderDetailsProps {
   onClose: () => void;
   onSendForSignature: (orderId: string, managerApprovalCode?: string, testMode?: boolean) => Promise<ValidationResponse | void>;
   onDelete: (orderId: string) => Promise<void>;
+  onCancelOrder?: (orderId: string, reason: string) => Promise<void>;
   onCancelSignature?: (orderId: string) => Promise<void>;
   onSendChangeOrderForSignature?: (changeOrderId: string) => Promise<void>;
   openWithPaymentApproval?: boolean;
@@ -54,6 +55,7 @@ const STATUS_STYLES: Record<OrderStatus, { bg: string; color: string; label: str
   sent_for_signature: { bg: '#e3f2fd', color: '#1565c0', label: 'Awaiting Signature' },
   signed: { bg: '#e8f5e9', color: '#2e7d32', label: 'Signed' },
   ready_for_manufacturer: { bg: '#4caf50', color: 'white', label: 'Ready for Manufacturer' },
+  cancelled: { bg: '#ffebee', color: '#c62828', label: 'Cancelled' },
 };
 
 function formatDate(timestamp: Timestamp | any | undefined): string {
@@ -100,6 +102,7 @@ export function OrderDetails({
   onClose,
   onSendForSignature,
   onDelete,
+  onCancelOrder,
   onCancelSignature,
   onSendChangeOrderForSignature,
   openWithPaymentApproval = false,
@@ -109,6 +112,9 @@ export function OrderDetails({
   const [sending, setSending] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [cancelling, setCancelling] = useState(false);
+  const [cancellingOrder, setCancellingOrder] = useState(false);
+  const [showCancelOrderModal, setShowCancelOrderModal] = useState(false);
+  const [cancelOrderReason, setCancelOrderReason] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [showManagerApproval, setShowManagerApproval] = useState(openWithPaymentApproval);
   const [managerCode, setManagerCode] = useState('');
@@ -367,6 +373,28 @@ export function OrderDetails({
     }
   };
 
+  const handleCancelOrder = async () => {
+    if (!order.id || !onCancelOrder) return;
+    if (!cancelOrderReason.trim()) {
+      setError('Please enter a reason for cancellation');
+      return;
+    }
+
+    setCancellingOrder(true);
+    setError(null);
+    try {
+      await onCancelOrder(order.id, cancelOrderReason.trim());
+      setShowCancelOrderModal(false);
+      setCancelOrderReason('');
+      onClose();
+    } catch (err: any) {
+      setError(err.message || 'Failed to cancel order');
+      console.error(err);
+    } finally {
+      setCancellingOrder(false);
+    }
+  };
+
   const handleTestSign = async () => {
     if (!order.id || !order.isTestMode) return;
 
@@ -579,6 +607,55 @@ export function OrderDetails({
         </div>
 
         {error && <div style={styles.error}>{error}</div>}
+
+        {/* Cancelled Order Banner */}
+        {order.status === 'cancelled' && (
+          <div style={styles.cancelledBanner}>
+            <div style={styles.cancelledBannerTitle}>Order Cancelled</div>
+            <div style={styles.cancelledBannerReason}>
+              <strong>Reason:</strong> {order.cancelReason || 'No reason provided'}
+            </div>
+            <div style={styles.cancelledBannerMeta}>
+              Cancelled by {order.cancelledByEmail || 'unknown'} on {formatDate(order.cancelledAt)}
+              {order.previousStatus && <> &middot; Previous status: {STATUS_STYLES[order.previousStatus]?.label || order.previousStatus}</>}
+            </div>
+          </div>
+        )}
+
+        {/* Cancel Order Modal */}
+        {showCancelOrderModal && (
+          <div style={styles.cancelOrderModal}>
+            <h4 style={styles.cancelOrderModalTitle}>Cancel Order</h4>
+            <p style={styles.cancelOrderModalText}>
+              This will permanently cancel this order. Active change orders and signature requests will also be cancelled. Payment records will be preserved.
+            </p>
+            <textarea
+              value={cancelOrderReason}
+              onChange={(e) => setCancelOrderReason(e.target.value)}
+              placeholder="Enter reason for cancellation..."
+              style={styles.cancelOrderTextarea}
+              rows={3}
+            />
+            <div style={styles.cancelOrderModalButtons}>
+              <button
+                onClick={() => { setShowCancelOrderModal(false); setCancelOrderReason(''); setError(null); }}
+                style={styles.cancelButton}
+              >
+                Back
+              </button>
+              <button
+                onClick={handleCancelOrder}
+                disabled={cancellingOrder || !cancelOrderReason.trim()}
+                style={{
+                  ...styles.confirmCancelButton,
+                  opacity: cancellingOrder || !cancelOrderReason.trim() ? 0.6 : 1,
+                }}
+              >
+                {cancellingOrder ? 'Cancelling...' : 'Confirm Cancellation'}
+              </button>
+            </div>
+          </div>
+        )}
 
         <div style={styles.content}>
           {/* ═══════════════════════════════════════════════════════════ */}
@@ -1442,17 +1519,33 @@ export function OrderDetails({
           {order.status === 'ready_for_manufacturer' && (
             <span style={styles.readyText}>Ready to send to manufacturer!</span>
           )}
+          {/* Cancelled status */}
+          {order.status === 'cancelled' && (
+            <span style={{ fontSize: '14px', color: '#c62828', fontWeight: 500 }}>This order has been cancelled</span>
+          )}
           {/* Approve Payment button - show anytime for manual payment types not yet approved */}
           {!showManagerApproval &&
            isManualPaymentType &&
            order.payment?.status !== 'paid' &&
            order.payment?.status !== 'manually_approved' &&
-           order.status !== 'ready_for_manufacturer' && (
+           order.status !== 'ready_for_manufacturer' &&
+           order.status !== 'cancelled' && (
             <button
               onClick={() => setShowManagerApproval(true)}
               style={styles.paymentApprovalButton}
             >
               Approve Payment
+            </button>
+          )}
+          {/* Cancel Order button - show for non-draft, non-cancelled orders */}
+          {onCancelOrder &&
+           order.status !== 'draft' &&
+           order.status !== 'cancelled' && (
+            <button
+              onClick={() => setShowCancelOrderModal(true)}
+              style={styles.cancelOrderButton}
+            >
+              Cancel Order
             </button>
           )}
         </div>
@@ -2440,5 +2533,82 @@ const styles: Record<string, React.CSSProperties> = {
     color: '#c62828',
     borderRadius: '8px',
     fontSize: '14px',
+  },
+  // Cancelled order styles
+  cancelledBanner: {
+    margin: '0 24px',
+    padding: '16px',
+    backgroundColor: '#ffebee',
+    borderRadius: '8px',
+    border: '1px solid #ef9a9a',
+  },
+  cancelledBannerTitle: {
+    fontSize: '16px',
+    fontWeight: 600,
+    color: '#c62828',
+    marginBottom: '8px',
+  },
+  cancelledBannerReason: {
+    fontSize: '14px',
+    color: '#c62828',
+    marginBottom: '6px',
+  },
+  cancelledBannerMeta: {
+    fontSize: '12px',
+    color: '#e57373',
+  },
+  cancelOrderButton: {
+    padding: '12px 24px',
+    backgroundColor: 'white',
+    color: '#c62828',
+    border: '1px solid #c62828',
+    borderRadius: '4px',
+    fontSize: '14px',
+    cursor: 'pointer',
+    fontWeight: 500,
+  },
+  cancelOrderModal: {
+    backgroundColor: '#ffebee',
+    border: '1px solid #ef9a9a',
+    borderRadius: '8px',
+    padding: '20px',
+    margin: '0 24px 16px 24px',
+  },
+  cancelOrderModalTitle: {
+    margin: '0 0 12px 0',
+    fontSize: '16px',
+    fontWeight: 600,
+    color: '#c62828',
+  },
+  cancelOrderModalText: {
+    margin: '0 0 12px 0',
+    fontSize: '14px',
+    color: '#b71c1c',
+  },
+  cancelOrderTextarea: {
+    width: '100%',
+    padding: '10px 12px',
+    border: '1px solid #ef9a9a',
+    borderRadius: '4px',
+    fontSize: '14px',
+    marginBottom: '12px',
+    boxSizing: 'border-box' as const,
+    resize: 'vertical' as const,
+    fontFamily: 'inherit',
+  },
+  cancelOrderModalButtons: {
+    display: 'flex',
+    gap: '12px',
+    justifyContent: 'flex-end',
+  },
+  confirmCancelButton: {
+    padding: '10px 20px',
+    backgroundColor: '#c62828',
+    color: 'white',
+    border: 'none',
+    borderRadius: '4px',
+    fontSize: '14px',
+    cursor: 'pointer',
+    fontWeight: 500,
   },
 };

@@ -470,6 +470,155 @@ export const cancelSignature = functions.https.onRequest(async (req, res) => {
 });
 
 /**
+ * Cancel an order entirely (not just its signature).
+ * Cancels linked SignNow invites, active change orders, and marks order as cancelled.
+ * Payment ledger entries are left intact (refunds tracked separately).
+ */
+export const cancelOrder = functions.https.onRequest(async (req, res) => {
+  res.set('Access-Control-Allow-Origin', '*');
+  res.set('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.set('Access-Control-Allow-Headers', 'Content-Type');
+
+  if (req.method === 'OPTIONS') { res.status(204).send(''); return; }
+  if (req.method !== 'POST') { res.status(405).json({ error: 'Method not allowed' }); return; }
+
+  const { orderId, cancelReason, cancelledBy, cancelledByEmail } = req.body;
+
+  if (!orderId) { res.status(400).json({ error: 'orderId is required' }); return; }
+  if (!cancelReason) { res.status(400).json({ error: 'cancelReason is required' }); return; }
+
+  try {
+    const db = admin.firestore();
+    const orderRef = db.collection('orders').doc(orderId);
+    const orderDoc = await orderRef.get();
+
+    if (!orderDoc.exists) {
+      res.status(404).json({ error: `Order ${orderId} not found` });
+      return;
+    }
+
+    const orderData = orderDoc.data()!;
+    const currentStatus = orderData.status;
+
+    // Reject if draft (use deleteOrder instead) or already cancelled
+    if (currentStatus === 'draft') {
+      res.status(400).json({ error: 'Draft orders should be deleted, not cancelled.' });
+      return;
+    }
+    if (currentStatus === 'cancelled') {
+      res.status(400).json({ error: 'Order is already cancelled.' });
+      return;
+    }
+
+    console.log(`Cancelling order ${orderId} (${orderData.orderNumber}), current status: ${currentStatus}`);
+
+    // 1. Cancel SignNow invite if order is sent_for_signature and has an esign document
+    if (currentStatus === 'sent_for_signature' && orderData.esignDocumentId) {
+      const esignDocRef = db.collection('esign_documents').doc(orderData.esignDocumentId);
+      const esignDoc = await esignDocRef.get();
+
+      if (esignDoc.exists) {
+        const esignData = esignDoc.data()!;
+        if (esignData.signNowDocumentId) {
+          try {
+            const cancelResult = await cancelSigningInvite(esignData.signNowDocumentId);
+            console.log('SignNow cancel result:', cancelResult);
+          } catch (err) {
+            console.warn('Failed to cancel SignNow invite (continuing):', err);
+          }
+        }
+        await esignDocRef.update({
+          status: 'cancelled',
+          cancelledAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+      }
+    }
+
+    // 2. Cancel active change orders
+    const changeOrdersQuery = await db
+      .collection('change_orders')
+      .where('orderId', '==', orderId)
+      .where('status', 'in', ['draft', 'pending_signature'])
+      .get();
+
+    for (const coDoc of changeOrdersQuery.docs) {
+      const coData = coDoc.data();
+      console.log(`Cancelling change order ${coDoc.id} (${coData.changeOrderNumber}), status: ${coData.status}`);
+
+      // Cancel SignNow invite if change order is pending_signature
+      if (coData.status === 'pending_signature' && coData.esignDocumentId) {
+        const coEsignRef = db.collection('esign_documents').doc(coData.esignDocumentId);
+        const coEsignDoc = await coEsignRef.get();
+        if (coEsignDoc.exists) {
+          const coEsignData = coEsignDoc.data()!;
+          if (coEsignData.signNowDocumentId) {
+            try {
+              await cancelSigningInvite(coEsignData.signNowDocumentId);
+            } catch (err) {
+              console.warn(`Failed to cancel SignNow invite for CO ${coDoc.id}:`, err);
+            }
+          }
+          await coEsignRef.update({
+            status: 'cancelled',
+            cancelledAt: admin.firestore.FieldValue.serverTimestamp(),
+          });
+        }
+      }
+
+      await coDoc.ref.update({
+        status: 'cancelled',
+        cancelledAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+    }
+
+    // 3. Update order — set cancelled status and metadata
+    await orderRef.update({
+      status: 'cancelled',
+      previousStatus: currentStatus,
+      cancelledAt: admin.firestore.FieldValue.serverTimestamp(),
+      cancelledBy: cancelledBy || 'unknown',
+      cancelledByEmail: cancelledByEmail || 'unknown',
+      cancelReason,
+      activeChangeOrderId: null,
+      activeChangeOrderStatus: null,
+    });
+
+    // 4. Audit log
+    await db.collection('order_audit_log').add({
+      orderId,
+      orderNumber: orderData.orderNumber,
+      action: 'cancelled',
+      changes: [
+        { field: 'status', oldValue: currentStatus, newValue: 'cancelled' },
+        { field: 'cancelReason', oldValue: null, newValue: cancelReason },
+      ],
+      userId: cancelledBy || 'unknown',
+      userEmail: cancelledByEmail || 'unknown',
+      timestamp: admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+    // 5. Interaction log
+    await db.collection('order_interactions').add({
+      orderId,
+      orderNumber: orderData.orderNumber,
+      type: 'order_cancelled',
+      description: `Order cancelled. Reason: ${cancelReason}`,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      createdBy: cancelledByEmail || cancelledBy || 'system',
+    });
+
+    console.log(`Order ${orderData.orderNumber} cancelled successfully`);
+    res.json({
+      success: true,
+      message: `Order ${orderData.orderNumber} has been cancelled.`,
+    });
+  } catch (error: any) {
+    console.error('Error cancelling order:', error);
+    res.status(500).json({ error: error.message || 'Failed to cancel order' });
+  }
+});
+
+/**
  * Reset an order to draft and re-trigger sendOrderForSignature.
  * Used when a test mode order needs to be resent with real SignNow delivery.
  */

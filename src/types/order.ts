@@ -1,7 +1,7 @@
 import { Timestamp } from 'firebase/firestore';
 import { PaymentSummary, OrderLedgerSummary } from './payment';
 
-export type OrderStatus = 'draft' | 'pending_payment' | 'sent_for_signature' | 'signed' | 'ready_for_manufacturer';
+export type OrderStatus = 'draft' | 'pending_payment' | 'sent_for_signature' | 'signed' | 'ready_for_manufacturer' | 'cancelled';
 
 export type PaymentType =
   | 'stripe_already_paid'
@@ -239,6 +239,12 @@ export interface Order {
   totalDepositDifference?: number;  // Cumulative deposit difference from original
   additionalDepositDue?: number;  // Amount owed from change orders (positive = customer owes)
   refundDue?: number;  // Amount we owe customer from change orders (positive = we owe)
+  // Cancellation tracking
+  cancelledAt?: Timestamp;
+  cancelledBy?: string;
+  cancelledByEmail?: string;
+  cancelReason?: string;
+  previousStatus?: OrderStatus;
   sentForSignatureAt?: Timestamp;
   signedAt?: Timestamp;
   paidAt?: Timestamp;

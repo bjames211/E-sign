@@ -508,6 +508,25 @@ export async function deleteOrder(orderId: string): Promise<void> {
   await deleteDoc(docRef);
 }
 
+// Cancel an order (calls Cloud Function)
+export async function cancelOrder(
+  orderId: string,
+  cancelReason: string,
+  cancelledBy: string,
+  cancelledByEmail: string
+): Promise<void> {
+  const response = await fetch(
+    `${import.meta.env.VITE_FUNCTIONS_URL || ''}/cancelOrder`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ orderId, cancelReason, cancelledBy, cancelledByEmail }),
+    }
+  );
+  const data = await response.json();
+  if (!data.success) throw new Error(data.error || 'Failed to cancel order');
+}
+
 // ==================== QUOTES ====================
 
 // Get all quotes

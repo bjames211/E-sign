@@ -37,6 +37,7 @@ const STATUS_STYLES: Record<OrderStatus, { bg: string; color: string; label: str
   sent_for_signature: { bg: '#e3f2fd', color: '#1565c0', label: 'In Progress' },
   signed: { bg: '#e8f5e9', color: '#2e7d32', label: 'Signed' },
   ready_for_manufacturer: { bg: '#4caf50', color: 'white', label: 'Ready' },
+  cancelled: { bg: '#ffebee', color: '#c62828', label: 'Cancelled' },
 };
 
 function formatDate(timestamp: Timestamp | any | undefined): string {

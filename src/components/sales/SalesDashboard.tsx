@@ -4,7 +4,7 @@ import { db } from '../../config/firebase';
 import { useAuth } from '../../contexts/AuthContext';
 import { Order } from '../../types/order';
 import { OrderDetails } from '../orders/OrderDetails';
-import { deleteOrder } from '../../services/orderService';
+import { deleteOrder, cancelOrder } from '../../services/orderService';
 
 interface ChangeOrder {
   id: string;
@@ -100,7 +100,7 @@ function getDateRangeFromPreset(preset: DatePreset): DateRange {
 }
 
 export function SalesDashboard({ onNavigateToChangeOrder }: SalesDashboardProps) {
-  const { userRole, userName, viewAsUser } = useAuth();
+  const { user, userRole, userName, viewAsUser } = useAuth();
   const isSalesRep = userRole === 'sales_rep';
   // For sales reps: lock filter to their name. For admin viewing-as: use that user's name.
   const forcedSalesPerson = isSalesRep
@@ -517,6 +517,11 @@ export function SalesDashboard({ onNavigateToChangeOrder }: SalesDashboardProps)
     if (!data.success) {
       throw new Error(data.error || 'Failed to cancel signature');
     }
+  };
+
+  const handleCancelOrder = async (orderId: string, reason: string) => {
+    await cancelOrder(orderId, reason, user?.uid || 'unknown', user?.email || 'unknown');
+    setSelectedOrder(null);
   };
 
   // Quick action: Resend signature request
@@ -1058,6 +1063,7 @@ export function SalesDashboard({ onNavigateToChangeOrder }: SalesDashboardProps)
           onClose={handleCloseDetails}
           onSendForSignature={handleSendForSignature}
           onDelete={handleDelete}
+          onCancelOrder={handleCancelOrder}
           onCancelSignature={handleCancelSignature}
           onNavigateToChangeOrder={onNavigateToChangeOrder ? (orderId) => {
             handleCloseDetails(); // Close the modal first

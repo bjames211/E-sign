@@ -983,6 +983,12 @@ export async function updateOrderOnSigned(esignDocumentId: string): Promise<void
   const orderRef = ordersQuery.docs[0].ref;
   const orderData = ordersQuery.docs[0].data();
 
+  // Guard: skip if order has been cancelled (race condition protection)
+  if (orderData.status === 'cancelled') {
+    console.log(`Order ${ordersQuery.docs[0].id} is cancelled — skipping signed update`);
+    return;
+  }
+
   // If this is a change order signature, update the change order status
   if (changeOrderId) {
     console.log(`This is a change order signature. Updating change order: ${changeOrderId}`);
