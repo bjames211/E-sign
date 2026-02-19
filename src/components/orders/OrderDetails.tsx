@@ -623,16 +623,7 @@ export function OrderDetails({
               let displayBuilding = order.building;
 
               if (isCurrent) {
-                // For current, get the latest customer/building from the most recent CO that has them
-                for (let i = signedChangeOrders.length - 1; i >= 0; i--) {
-                  if (signedChangeOrders[i].newCustomer && !displayCustomer) {
-                    displayCustomer = signedChangeOrders[i].newCustomer!;
-                  }
-                  if (signedChangeOrders[i].newBuilding && !displayBuilding) {
-                    displayBuilding = signedChangeOrders[i].newBuilding!;
-                  }
-                }
-                // Use latest if available
+                // Use the most recent signed CO's values if available
                 const latestCO = signedChangeOrders[signedChangeOrders.length - 1];
                 if (latestCO?.newCustomer) displayCustomer = latestCO.newCustomer;
                 if (latestCO?.newBuilding) displayBuilding = latestCO.newBuilding;
@@ -912,86 +903,39 @@ export function OrderDetails({
                       <div style={styles.priceRow}>
                         <span>Balance Due at Delivery</span>
                         <span>
-                          ${(displayPricing.subtotalBeforeTax - displayPricing.deposit).toLocaleString()}
+                          ${(displayPricing.subtotalBeforeTax + (displayPricing.extraMoneyFluff || 0) - displayPricing.deposit).toLocaleString()}
                         </span>
                       </div>
                     </div>
                   </div>
 
-                  {/* Order Form PDF with Financial Summary */}
+                  {/* Order Form PDF */}
                   {order.files?.orderFormPdf && (
                     <div style={styles.orderFormSection}>
                       <h4 style={styles.sectionTitle}>Order Form</h4>
-                      <div style={styles.orderFormWithSummary}>
-                        <div style={styles.orderFormCard}>
-                          <div style={styles.orderFormInfo}>
-                            <span style={styles.orderFormName}>{order.files.orderFormPdf.name}</span>
-                            <span style={styles.orderFormSize}>
-                              {(order.files.orderFormPdf.size / 1024).toFixed(1)} KB
-                            </span>
-                          </div>
-                          <div style={styles.orderFormActions}>
-                            <a
-                              href={order.files.orderFormPdf.downloadUrl}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              style={styles.viewButton}
-                            >
-                              View PDF
-                            </a>
-                            <a
-                              href={order.files.orderFormPdf.downloadUrl}
-                              download={order.files.orderFormPdf.name}
-                              style={styles.downloadButton}
-                            >
-                              Download
-                            </a>
-                          </div>
+                      <div style={styles.orderFormCard}>
+                        <div style={styles.orderFormInfo}>
+                          <span style={styles.orderFormName}>{order.files.orderFormPdf.name}</span>
+                          <span style={styles.orderFormSize}>
+                            {(order.files.orderFormPdf.size / 1024).toFixed(1)} KB
+                          </span>
                         </div>
-                        {/* PDF Financial Audit Summary */}
-                        <div style={styles.pdfAuditSummary}>
-                          <div style={styles.pdfAuditRow}>
-                            <span style={styles.pdfAuditLabel}>Order Total:</span>
-                            <span style={styles.pdfAuditValue}>
-                              ${(displayPricing.subtotalBeforeTax + (displayPricing.extraMoneyFluff || 0)).toLocaleString()}
-                            </span>
-                          </div>
-                          <div style={styles.pdfAuditRow}>
-                            <span style={styles.pdfAuditLabel}>Deposit Required:</span>
-                            <span style={styles.pdfAuditValue}>
-                              ${displayPricing.deposit.toLocaleString()}
-                            </span>
-                          </div>
-                          {order.ledgerSummary && (
-                            <div style={styles.pdfAuditRow}>
-                              <span style={styles.pdfAuditLabel}>Deposit Charged:</span>
-                              <span style={{
-                                ...styles.pdfAuditValue,
-                                color: order.ledgerSummary.balance === 0 ? '#2e7d32' : '#e65100',
-                              }}>
-                                ${order.ledgerSummary.netReceived.toLocaleString()}
-                                {order.ledgerSummary.balance !== 0 && (
-                                  <span style={styles.pdfAuditDiff}>
-                                    {order.ledgerSummary.balance > 0 ? ` (${order.ledgerSummary.balance.toLocaleString()} owed)` : ` (${Math.abs(order.ledgerSummary.balance).toLocaleString()} overpaid)`}
-                                  </span>
-                                )}
-                              </span>
-                            </div>
-                          )}
-                          {order.validation?.pdfExtractedData?.deposit && (
-                            <div style={styles.pdfAuditRow}>
-                              <span style={styles.pdfAuditLabel}>PDF Shows Deposit:</span>
-                              <span style={{
-                                ...styles.pdfAuditValue,
-                                color: order.validation.pdfExtractedData.deposit === displayPricing.deposit ? '#2e7d32' : '#c62828',
-                              }}>
-                                ${order.validation.pdfExtractedData.deposit.toLocaleString()}
-                                {order.validation.pdfExtractedData.deposit !== displayPricing.deposit && (
-                                  <span style={styles.pdfAuditWarning}> (mismatch!)</span>
-                                )}
-                              </span>
-                            </div>
-                          )}
+                        <div style={styles.orderFormActions}>
+                          <a
+                            href={order.files.orderFormPdf.downloadUrl}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            style={styles.viewButton}
+                          >
+                            View PDF
+                          </a>
+                          <a
+                            href={order.files.orderFormPdf.downloadUrl}
+                            download={order.files.orderFormPdf.name}
+                            style={styles.downloadButton}
+                          >
+                            Download
+                          </a>
                         </div>
                       </div>
                     </div>
@@ -1170,245 +1114,6 @@ export function OrderDetails({
               </div>
             )}
           </div>
-
-          {/* ═══════════════════════════════════════════════════════════ */}
-          {/* CURRENT TOTALS - Only show if change orders exist */}
-          {/* ═══════════════════════════════════════════════════════════ */}
-          {order.originalPricing && changeOrders.length > 0 && (
-            <div style={styles.majorSection}>
-              <h3 style={styles.majorSectionTitle}>CURRENT TOTALS</h3>
-              <div style={styles.currentTotalsGrid}>
-                <div style={styles.currentTotalsRow}>
-                  <span style={styles.currentTotalsLabel}></span>
-                  <span style={styles.currentTotalsHeader}>Original</span>
-                  <span style={styles.currentTotalsHeader}>Current</span>
-                  <span style={styles.currentTotalsHeader}>Difference</span>
-                </div>
-                <div style={styles.currentTotalsRow}>
-                  <span style={styles.currentTotalsLabel}>Subtotal</span>
-                  <span style={styles.currentTotalsValue}>
-                    ${order.originalPricing.subtotalBeforeTax.toLocaleString()}
-                  </span>
-                  <span style={styles.currentTotalsValue}>
-                    ${order.pricing.subtotalBeforeTax.toLocaleString()}
-                  </span>
-                  <span style={{
-                    ...styles.currentTotalsDiff,
-                    color: order.pricing.subtotalBeforeTax - order.originalPricing.subtotalBeforeTax === 0
-                      ? '#666'
-                      : order.pricing.subtotalBeforeTax - order.originalPricing.subtotalBeforeTax > 0
-                        ? '#2e7d32'
-                        : '#c62828'
-                  }}>
-                    {order.pricing.subtotalBeforeTax - order.originalPricing.subtotalBeforeTax === 0
-                      ? '$0'
-                      : `${order.pricing.subtotalBeforeTax - order.originalPricing.subtotalBeforeTax > 0 ? '+' : ''}$${(order.pricing.subtotalBeforeTax - order.originalPricing.subtotalBeforeTax).toLocaleString()}`}
-                  </span>
-                </div>
-                <div style={styles.currentTotalsRow}>
-                  <span style={styles.currentTotalsLabel}>Deposit</span>
-                  <span style={styles.currentTotalsValue}>
-                    ${order.originalPricing.deposit.toLocaleString()}
-                  </span>
-                  <span style={styles.currentTotalsValue}>
-                    ${order.pricing.deposit.toLocaleString()}
-                  </span>
-                  <span style={{
-                    ...styles.currentTotalsDiff,
-                    color: order.pricing.deposit - order.originalPricing.deposit === 0
-                      ? '#666'
-                      : order.pricing.deposit - order.originalPricing.deposit > 0
-                        ? '#2e7d32'
-                        : '#c62828'
-                  }}>
-                    {order.pricing.deposit - order.originalPricing.deposit === 0
-                      ? '$0'
-                      : `${order.pricing.deposit - order.originalPricing.deposit > 0 ? '+' : ''}$${(order.pricing.deposit - order.originalPricing.deposit).toLocaleString()}`}
-                  </span>
-                </div>
-                {order.totalDepositDifference !== undefined && order.totalDepositDifference !== 0 && (
-                  <div style={styles.additionalDepositRow}>
-                    <span style={styles.additionalDepositLabel}>
-                      {order.totalDepositDifference > 0 ? 'Additional Deposit to Collect:' : 'Refund Due to Customer:'}
-                    </span>
-                    <span style={{
-                      ...styles.additionalDepositValue,
-                      color: order.totalDepositDifference > 0 ? '#2e7d32' : '#c62828'
-                    }}>
-                      ${Math.abs(order.totalDepositDifference).toLocaleString()}
-                    </span>
-                  </div>
-                )}
-              </div>
-            </div>
-          )}
-
-          {/* ═══════════════════════════════════════════════════════════ */}
-          {/* BALANCE STATUS */}
-          {/* ═══════════════════════════════════════════════════════════ */}
-          {(() => {
-            // Use ledger summary if available (new single source of truth)
-            const ledgerSummary = order.ledgerSummary;
-
-            // Check for live change order (pending_signature) - if present, use its values
-            const liveCO = pendingSignatureChangeOrder;
-
-            let currentDeposit = 0;
-            let originalDeposit = 0;
-            let totalPaid = 0;
-            let balance = 0;
-
-            if (ledgerSummary) {
-              // Use ledger summary as base
-              originalDeposit = ledgerSummary.originalDeposit;
-              totalPaid = ledgerSummary.netReceived;
-
-              // If there's a live CO, use its deposit as the effective deposit
-              if (liveCO) {
-                currentDeposit = liveCO.newValues.deposit;
-                balance = currentDeposit - totalPaid;
-              } else {
-                currentDeposit = ledgerSummary.depositRequired;
-                balance = ledgerSummary.balance;
-              }
-            } else {
-              // Legacy calculation (for orders not yet migrated to ledger)
-              currentDeposit = order.pricing?.deposit || 0;
-              originalDeposit = order.originalPricing?.deposit || currentDeposit;
-
-              // Get total paid from paymentSummary or calculate from payment status
-              totalPaid = order.paymentSummary?.totalPaid || 0;
-
-              // If no payment summary but order shows as paid, use original deposit as paid amount
-              if (totalPaid === 0 && (order.payment?.status === 'paid' || order.payment?.status === 'manually_approved')) {
-                totalPaid = originalDeposit;
-              }
-
-              // If test mode with test payment amount, use that
-              if (order.isTestMode && order.testPaymentAmount !== undefined && order.testPaymentAmount > 0 && totalPaid === 0) {
-                totalPaid = order.testPaymentAmount;
-              }
-
-              // Balance = what's required - what's paid
-              balance = currentDeposit - totalPaid;
-            }
-
-            // Determine status
-            // Positive balance = customer owes more (underpaid)
-            // Negative balance = we owe customer (overpaid)
-            // Zero = correct
-            let balanceStatus: 'correct' | 'underpaid' | 'overpaid' = 'correct';
-            if (balance > 0.01) {
-              balanceStatus = 'underpaid';
-            } else if (balance < -0.01) {
-              balanceStatus = 'overpaid';
-            }
-
-            const statusConfig = {
-              correct: {
-                bg: '#e8f5e9',
-                border: '#a5d6a7',
-                color: '#2e7d32',
-                icon: '✓',
-                label: 'Paid Correctly',
-              },
-              underpaid: {
-                bg: '#fff3e0',
-                border: '#ffcc80',
-                color: '#e65100',
-                icon: '!',
-                label: 'Underpaid',
-              },
-              overpaid: {
-                bg: '#e3f2fd',
-                border: '#90caf9',
-                color: '#1565c0',
-                icon: '$',
-                label: 'Overpaid - Refund Due',
-              },
-            };
-
-            const config = statusConfig[balanceStatus];
-
-            return (
-              <div style={styles.majorSection}>
-                <h3 style={styles.majorSectionTitle}>BALANCE STATUS</h3>
-                <div style={{
-                  ...styles.balanceStatusCard,
-                  backgroundColor: config.bg,
-                  borderColor: config.border,
-                }}>
-                  <div style={styles.balanceStatusHeader}>
-                    <span style={{
-                      ...styles.balanceStatusIcon,
-                      backgroundColor: config.color,
-                    }}>
-                      {config.icon}
-                    </span>
-                    <span style={{ ...styles.balanceStatusLabel, color: config.color }}>
-                      {config.label}
-                    </span>
-                  </div>
-
-                  <div style={styles.balanceStatusGrid}>
-                    <div style={styles.balanceStatusRow}>
-                      <span style={styles.balanceStatusRowLabel}>Required Deposit:</span>
-                      <span style={styles.balanceStatusRowValue}>${currentDeposit.toLocaleString()}</span>
-                    </div>
-                    <div style={styles.balanceStatusRow}>
-                      <span style={styles.balanceStatusRowLabel}>Total Paid:</span>
-                      <span style={styles.balanceStatusRowValue}>${totalPaid.toLocaleString()}</span>
-                    </div>
-                    <div style={{
-                      ...styles.balanceStatusRow,
-                      ...styles.balanceStatusTotal,
-                    }}>
-                      <span style={styles.balanceStatusRowLabel}>
-                        {balanceStatus === 'overpaid' ? 'Refund Due:' : balanceStatus === 'underpaid' ? 'Still Owed:' : 'Balance:'}
-                      </span>
-                      <span style={{
-                        ...styles.balanceStatusRowValue,
-                        ...styles.balanceStatusAmount,
-                        color: config.color,
-                      }}>
-                        ${Math.abs(balance).toLocaleString()}
-                      </span>
-                    </div>
-                  </div>
-
-                  {/* Show live CO notice if applicable */}
-                  {liveCO && (
-                    <div style={{
-                      ...styles.balanceStatusNote,
-                      backgroundColor: '#e3f2fd',
-                      borderColor: '#90caf9',
-                    }}>
-                      <span style={styles.balanceStatusNoteIcon}>📝</span>
-                      <span>
-                        <strong>{liveCO.changeOrderNumber}</strong> awaiting signature.
-                        {' '}Showing effective deposit of ${currentDeposit.toLocaleString()}
-                        {' '}(was ${(order.ledgerSummary?.depositRequired || order.pricing?.deposit || 0).toLocaleString()}).
-                      </span>
-                    </div>
-                  )}
-
-                  {/* Show change order impact if applicable */}
-                  {!liveCO && order.originalPricing && currentDeposit !== originalDeposit && (
-                    <div style={styles.balanceStatusNote}>
-                      <span style={styles.balanceStatusNoteIcon}>ℹ</span>
-                      <span>
-                        Original deposit was ${originalDeposit.toLocaleString()}.
-                        {currentDeposit > originalDeposit
-                          ? ` Change orders added $${(currentDeposit - originalDeposit).toLocaleString()}.`
-                          : ` Change orders reduced by $${(originalDeposit - currentDeposit).toLocaleString()}.`
-                        }
-                      </span>
-                    </div>
-                  )}
-                </div>
-              </div>
-            );
-          })()}
 
           {/* ═══════════════════════════════════════════════════════════ */}
           {/* TRANSACTIONS LEDGER */}
@@ -1721,7 +1426,7 @@ export function OrderDetails({
               {/* Change Order button */}
               {onNavigateToChangeOrder && (
                 <button
-                  onClick={() => onNavigateToChangeOrder(order.id || (order as any).id)}
+                  onClick={() => onNavigateToChangeOrder(order.id || '')}
                   style={styles.changeOrderButton}
                 >
                   + Change Order
@@ -1915,59 +1620,6 @@ const styles: Record<string, React.CSSProperties> = {
     borderRadius: '8px',
     fontSize: '14px',
   },
-  // Current Totals Styles
-  currentTotalsGrid: {
-    backgroundColor: '#f9f9f9',
-    borderRadius: '8px',
-    padding: '16px',
-    border: '1px solid #e0e0e0',
-  },
-  currentTotalsRow: {
-    display: 'grid',
-    gridTemplateColumns: '100px 1fr 1fr 1fr',
-    gap: '12px',
-    padding: '8px 0',
-    alignItems: 'center',
-  },
-  currentTotalsLabel: {
-    fontSize: '13px',
-    color: '#666',
-    fontWeight: 500,
-  },
-  currentTotalsHeader: {
-    fontSize: '11px',
-    color: '#999',
-    textTransform: 'uppercase',
-    fontWeight: 600,
-    textAlign: 'right',
-  },
-  currentTotalsValue: {
-    fontSize: '14px',
-    color: '#333',
-    textAlign: 'right',
-  },
-  currentTotalsDiff: {
-    fontSize: '14px',
-    fontWeight: 600,
-    textAlign: 'right',
-  },
-  additionalDepositRow: {
-    display: 'flex',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginTop: '12px',
-    paddingTop: '12px',
-    borderTop: '1px solid #ddd',
-  },
-  additionalDepositLabel: {
-    fontSize: '14px',
-    fontWeight: 500,
-    color: '#333',
-  },
-  additionalDepositValue: {
-    fontSize: '16px',
-    fontWeight: 600,
-  },
   // Tab styles for Original/CO/Current view
   viewTabsContainer: {
     marginBottom: '16px',
@@ -2060,76 +1712,6 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: '12px',
     fontWeight: 600,
     color: '#2e7d32',
-  },
-  // Balance Status Card styles
-  balanceStatusCard: {
-    borderRadius: '12px',
-    padding: '20px',
-    border: '2px solid',
-  },
-  balanceStatusHeader: {
-    display: 'flex',
-    alignItems: 'center',
-    gap: '12px',
-    marginBottom: '16px',
-  },
-  balanceStatusIcon: {
-    width: '32px',
-    height: '32px',
-    borderRadius: '50%',
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    color: 'white',
-    fontWeight: 700,
-    fontSize: '16px',
-  },
-  balanceStatusLabel: {
-    fontSize: '18px',
-    fontWeight: 600,
-  },
-  balanceStatusGrid: {
-    display: 'flex',
-    flexDirection: 'column',
-    gap: '8px',
-  },
-  balanceStatusRow: {
-    display: 'flex',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    padding: '8px 0',
-  },
-  balanceStatusRowLabel: {
-    fontSize: '14px',
-    color: '#666',
-  },
-  balanceStatusRowValue: {
-    fontSize: '14px',
-    fontWeight: 500,
-    color: '#333',
-  },
-  balanceStatusTotal: {
-    borderTop: '1px solid rgba(0,0,0,0.1)',
-    marginTop: '8px',
-    paddingTop: '12px',
-  },
-  balanceStatusAmount: {
-    fontSize: '20px',
-    fontWeight: 700,
-  },
-  balanceStatusNote: {
-    display: 'flex',
-    alignItems: 'flex-start',
-    gap: '8px',
-    marginTop: '16px',
-    padding: '12px',
-    backgroundColor: 'rgba(255,255,255,0.6)',
-    borderRadius: '8px',
-    fontSize: '13px',
-    color: '#666',
-  },
-  balanceStatusNoteIcon: {
-    fontSize: '14px',
   },
   orderNumber: {
     fontSize: '20px',
@@ -2562,41 +2144,6 @@ const styles: Record<string, React.CSSProperties> = {
     fontWeight: 500,
     textDecoration: 'none',
     cursor: 'pointer',
-  },
-  orderFormWithSummary: {
-    display: 'flex',
-    flexDirection: 'column',
-    gap: '12px',
-  },
-  pdfAuditSummary: {
-    display: 'grid',
-    gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))',
-    gap: '8px 16px',
-    backgroundColor: 'white',
-    borderRadius: '6px',
-    padding: '12px 16px',
-  },
-  pdfAuditRow: {
-    display: 'flex',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    fontSize: '13px',
-  },
-  pdfAuditLabel: {
-    color: '#666',
-  },
-  pdfAuditValue: {
-    fontWeight: 600,
-    color: '#333',
-  },
-  pdfAuditDiff: {
-    fontSize: '11px',
-    fontWeight: 500,
-  },
-  pdfAuditWarning: {
-    color: '#c62828',
-    fontWeight: 600,
-    fontSize: '11px',
   },
   paymentStatusBadge: {
     padding: '4px 10px',
