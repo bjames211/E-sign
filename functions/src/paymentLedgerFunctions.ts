@@ -1126,6 +1126,27 @@ export const recalculateLedgerSummary = functions.https.onRequest(async (req, re
       return;
     }
 
+    // Optional: fix pricing from active change order if it was never applied
+    const { fixPricing } = req.body;
+    if (fixPricing) {
+      const orderDoc = await db.collection('orders').doc(orderId).get();
+      const orderData = orderDoc.data();
+      const activeCoId = orderData?.activeChangeOrderId;
+      if (activeCoId) {
+        const coDoc = await db.collection('change_orders').doc(activeCoId).get();
+        const coData = coDoc.data();
+        if (coData && coData.newValues?.deposit && coData.newValues.deposit !== orderData?.pricing?.deposit) {
+          const fixedPricing = {
+            subtotalBeforeTax: coData.newValues.subtotalBeforeTax ?? orderData?.pricing?.subtotalBeforeTax,
+            extraMoneyFluff: coData.newValues.extraMoneyFluff ?? orderData?.pricing?.extraMoneyFluff,
+            deposit: coData.newValues.deposit,
+          };
+          await db.collection('orders').doc(orderId).update({ pricing: fixedPricing });
+          console.log(`Fixed pricing.deposit from ${orderData?.pricing?.deposit} to ${fixedPricing.deposit} (from CO ${activeCoId})`);
+        }
+      }
+    }
+
     const summary = await updateOrderLedgerSummary(orderId, db);
 
     console.log(`Ledger summary recalculated for order ${orderId}`);

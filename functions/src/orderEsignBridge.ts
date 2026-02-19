@@ -1238,6 +1238,34 @@ export const sendChangeOrderForSignature = functions.https.onRequest(async (req,
       return;
     }
 
+    // Apply change order pricing to order FIRST (before payment handling)
+    // so that updateOrderLedgerSummary reads the correct deposit amount.
+    const newPricing = {
+      subtotalBeforeTax: changeOrderData.newValues.subtotalBeforeTax,
+      extraMoneyFluff: changeOrderData.newValues.extraMoneyFluff,
+      deposit: changeOrderData.newValues.deposit,
+    };
+    const originalPricing = orderData.originalPricing || orderData.pricing;
+    const totalDepositDifference = newPricing.deposit - originalPricing.deposit;
+
+    const pricingUpdate: Record<string, unknown> = {
+      pricing: newPricing,
+      originalPricing: originalPricing,
+      totalDepositDifference,
+    };
+    // Apply customer changes if present
+    if (changeOrderData.newCustomer) {
+      pricingUpdate.customer = changeOrderData.newCustomer;
+      console.log('Applying customer changes from change order');
+    }
+    // Apply building changes if present
+    if (changeOrderData.newBuilding) {
+      pricingUpdate.building = changeOrderData.newBuilding;
+      console.log('Applying building changes from change order');
+    }
+    await orderRef.update(pricingUpdate);
+    console.log(`Applied change order pricing: subtotal=${newPricing.subtotalBeforeTax}, deposit=${newPricing.deposit}`);
+
     // Handle payment record creation for deposit differences
     let paymentRecordId: string | undefined;
     let paymentStatus: 'not_required' | 'pending' | 'collected' | 'refund_pending' = 'not_required';
@@ -1500,48 +1528,16 @@ export const sendChangeOrderForSignature = functions.https.onRequest(async (req,
       }
     }
 
-    // Apply change order pricing to the order
-    const newPricing = {
-      subtotalBeforeTax: changeOrderData.newValues.subtotalBeforeTax,
-      extraMoneyFluff: changeOrderData.newValues.extraMoneyFluff,
-      deposit: changeOrderData.newValues.deposit,
-    };
-
-    // Store original pricing if not already stored
-    const originalPricing = orderData.originalPricing || orderData.pricing;
-
-    // Calculate total deposit difference from original
-    const totalDepositDifference = newPricing.deposit - originalPricing.deposit;
-
-    // Build update object with new pricing
-    const orderUpdate: Record<string, unknown> = {
-      pricing: newPricing,
-      originalPricing: originalPricing, // Ensure original is preserved
-      totalDepositDifference,
+    // Pricing and customer/building changes already applied above (before payment handling).
+    // Just update order status for the SignNow flow.
+    await orderRef.update({
       status: 'draft', // Reset to draft before re-sending
       activeChangeOrderId: changeOrderId,
-    };
-
-    // Apply customer changes if present
-    if (changeOrderData.newCustomer) {
-      orderUpdate.customer = changeOrderData.newCustomer;
-      console.log('Applying customer changes from change order');
-    }
-
-    // Apply building changes if present
-    if (changeOrderData.newBuilding) {
-      orderUpdate.building = changeOrderData.newBuilding;
-      console.log('Applying building changes from change order');
-    }
-
-    // Update the order with new values
-    await orderRef.update(orderUpdate);
+    });
 
     // Use updated customer/building data for the rest of the function
     const finalCustomerData = changeOrderData.newCustomer || orderData.customer;
     const finalBuildingData = changeOrderData.newBuilding || orderData.building;
-
-    console.log(`Applied change order pricing: subtotal=${newPricing.subtotalBeforeTax}, deposit=${newPricing.deposit}`);
 
     // Download the PDF (using change order PDF if available, otherwise order PDF)
     console.log('Downloading PDF from:', pdfToUse);
