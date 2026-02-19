@@ -112,11 +112,11 @@ export async function seedAdminOptions(): Promise<void> {
 export async function seedManufacturerConfig(): Promise<void> {
   const db = admin.firestore();
   const configs = [
-    { name: 'Eagle Carports', signNowTemplateId: 'c16f3961f66f4348bf7c6bd9ece33735040b0b95', depositPercent: 19, active: true },
-    { name: 'American Carports', signNowTemplateId: '2e11d4ae2dd94a17a75cbe75c565763765844c85', depositPercent: 20, active: true },
-    { name: 'Coast to Coast Carports', signNowTemplateId: '', depositPercent: 20, active: true },
-    { name: 'American West Coast', signNowTemplateId: '', depositPercent: 20, active: true },
-    { name: 'Viking Steel Structures', signNowTemplateId: '', depositPercent: 20, active: true },
+    { name: 'Eagle Carports', sku: null, signNowTemplateId: 'c16f3961f66f4348bf7c6bd9ece33735040b0b95', depositPercent: 19, active: true },
+    { name: 'American Carports', sku: null, signNowTemplateId: '2e11d4ae2dd94a17a75cbe75c565763765844c85', depositPercent: 20, active: true },
+    { name: 'Coast to Coast Carports', sku: null, signNowTemplateId: '', depositPercent: 20, active: true },
+    { name: 'American West Coast', sku: null, signNowTemplateId: '', depositPercent: 20, active: true },
+    { name: 'Viking Steel Structures', sku: null, signNowTemplateId: '', depositPercent: 20, active: true },
   ];
 
   const batch = db.batch();
@@ -847,6 +847,10 @@ export async function seedPartialPaymentOrders(): Promise<{ created: number; ord
       };
 
       await db.collection('ledger_summaries').doc(orderRef.id).set(summaryData);
+
+      // Also write ledgerSummary to the order document (this is what the app reads)
+      await orderRef.update({ ledgerSummary: summaryData });
+
       createdOrders.push(orderNumber);
 
     } catch (err) {

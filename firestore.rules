@@ -101,6 +101,13 @@ service cloud.firestore {
       allow update, delete: if false;
     }
 
+    // Manufacturer config changelog - authenticated read/create, no update/delete
+    match /manufacturer_config_changelog/{entryId} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated();
+      allow update, delete: if false;
+    }
+
     // Extracted PDF data - read only, Cloud Functions write
     match /extracted_pdf_data/{docId} {
       allow read: if isAuthenticated();

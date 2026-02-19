@@ -1,11 +1,6 @@
 import * as functions from 'firebase-functions/v1';
 import * as admin from 'firebase-admin';
-import Stripe from 'stripe';
-
-// Initialize Stripe
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || 'sk_test_placeholder', {
-  apiVersion: '2023-10-16',
-});
+import { stripe } from './config/stripe';
 
 // ============================================================
 // DAILY RECONCILIATION REPORT
@@ -33,6 +28,14 @@ interface OrderWithIssue {
   balanceStatus: string;
   depositRequired: number;
   totalReceived: number;
+}
+
+interface MissingLedgerEntry {
+  stripePaymentId: string;
+  amount: number;
+  orderId?: string;
+  customerEmail?: string;
+  createdAt: string;
 }
 
 /**
@@ -125,6 +128,7 @@ export const dailyReconciliation = functions.pubsub
 
       // 3. Check for recent Stripe payments not in ledger (last 24 hours)
       const yesterday = new Date(today.getTime() - 24 * 60 * 60 * 1000);
+      const missingLedgerEntries: MissingLedgerEntry[] = [];
 
       try {
         const recentPayments = await stripe.paymentIntents.list({
@@ -144,6 +148,13 @@ export const dailyReconciliation = functions.pubsub
 
           if (ledgerQuery.empty) {
             report.stripePaymentsNotInLedger++;
+            missingLedgerEntries.push({
+              stripePaymentId: pi.id,
+              amount: pi.amount / 100,
+              orderId: pi.metadata?.orderId || undefined,
+              customerEmail: pi.metadata?.customerEmail || pi.receipt_email || undefined,
+              createdAt: new Date(pi.created * 1000).toISOString(),
+            });
           }
         }
       } catch (stripeError) {
@@ -156,6 +167,7 @@ export const dailyReconciliation = functions.pubsub
         ...report,
         underpaidOrders: underpaidOrdersList,
         overpaidOrders: overpaidOrdersList,
+        missingLedgerEntries,
         generatedAt: admin.firestore.FieldValue.serverTimestamp(),
       });
 
@@ -168,8 +180,12 @@ export const dailyReconciliation = functions.pubsub
       `);
 
       // 5. Send email notification if there are issues
-      if (report.ordersWithBalanceIssues > 0 || report.stripePaymentsNotInLedger > 0) {
-        await sendReconciliationAlert(report, underpaidOrdersList, overpaidOrdersList);
+      const hasIssues = report.ordersWithBalanceIssues > 0 ||
+        report.stripePaymentsNotInLedger > 0 ||
+        report.ledgerEntriesWithoutStripeVerification > 0;
+
+      if (hasIssues) {
+        await sendReconciliationAlert(report, underpaidOrdersList, overpaidOrdersList, missingLedgerEntries);
       }
 
       return null;
@@ -186,14 +202,17 @@ export const dailyReconciliation = functions.pubsub
 async function sendReconciliationAlert(
   report: DailyReportSummary,
   underpaidOrders: OrderWithIssue[],
-  overpaidOrders: OrderWithIssue[]
+  overpaidOrders: OrderWithIssue[],
+  missingLedgerEntries: MissingLedgerEntry[] = []
 ): Promise<void> {
   const db = admin.firestore();
 
-  // Check if email extension is available (mail collection)
-  // This uses the Firebase "Trigger Email" extension if configured
   try {
     const adminEmail = process.env.ADMIN_EMAIL || 'admin@example.com';
+
+    const totalIssues = report.ordersWithBalanceIssues +
+      report.stripePaymentsNotInLedger +
+      report.ledgerEntriesWithoutStripeVerification;
 
     const emailBody = `
 Daily Reconciliation Report - ${report.date}
@@ -205,7 +224,7 @@ Summary:
 - Total Receivables Outstanding: $${report.totalReceivablesOutstanding.toFixed(2)}
 - Total Refunds Due: $${report.totalRefundsDue.toFixed(2)}
 - Unverified Stripe Entries: ${report.ledgerEntriesWithoutStripeVerification}
-- Missing Ledger Entries: ${report.stripePaymentsNotInLedger}
+- Stripe Payments Missing from Ledger: ${report.stripePaymentsNotInLedger}
 
 ${underpaidOrders.length > 0 ? `
 Underpaid Orders (${underpaidOrders.length}):
@@ -214,7 +233,6 @@ ${underpaidOrders.slice(0, 10).map(o =>
 ).join('\n')}
 ${underpaidOrders.length > 10 ? `  ... and ${underpaidOrders.length - 10} more` : ''}
 ` : ''}
-
 ${overpaidOrders.length > 0 ? `
 Overpaid Orders (${overpaidOrders.length}):
 ${overpaidOrders.slice(0, 10).map(o =>
@@ -222,7 +240,17 @@ ${overpaidOrders.slice(0, 10).map(o =>
 ).join('\n')}
 ${overpaidOrders.length > 10 ? `  ... and ${overpaidOrders.length - 10} more` : ''}
 ` : ''}
-
+${missingLedgerEntries.length > 0 ? `
+Stripe Payments Missing from Ledger (${missingLedgerEntries.length}):
+${missingLedgerEntries.slice(0, 10).map(e =>
+  `  - ${e.stripePaymentId}: $${e.amount.toFixed(2)}${e.orderId ? ` (Order: ${e.orderId})` : ''}${e.customerEmail ? ` - ${e.customerEmail}` : ''} - ${e.createdAt}`
+).join('\n')}
+${missingLedgerEntries.length > 10 ? `  ... and ${missingLedgerEntries.length - 10} more` : ''}
+` : ''}
+${report.ledgerEntriesWithoutStripeVerification > 0 ? `
+WARNING: ${report.ledgerEntriesWithoutStripeVerification} Stripe ledger entries have not been verified against Stripe.
+These may indicate webhook failures or data integrity issues. Please run a manual reconciliation.
+` : ''}
 Please review these issues in the admin dashboard.
     `.trim();
 
@@ -230,7 +258,7 @@ Please review these issues in the admin dashboard.
     await db.collection('mail').add({
       to: adminEmail,
       message: {
-        subject: `Payment Reconciliation Report - ${report.date} (${report.ordersWithBalanceIssues} issues)`,
+        subject: `Payment Reconciliation Report - ${report.date} (${totalIssues} issue${totalIssues !== 1 ? 's' : ''})`,
         text: emailBody,
       },
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
@@ -342,14 +370,59 @@ export const triggerReconciliation = functions.https.onRequest(async (req, res) 
 
     report.ledgerEntriesWithoutStripeVerification = unverifiedQuery.size;
 
+    // Check for recent Stripe payments not in ledger (last 24 hours)
+    const yesterday = new Date(today.getTime() - 24 * 60 * 60 * 1000);
+    const missingLedgerEntries: MissingLedgerEntry[] = [];
+
+    try {
+      const recentPayments = await stripe.paymentIntents.list({
+        created: {
+          gte: Math.floor(yesterday.getTime() / 1000),
+        },
+        limit: 100,
+      });
+
+      for (const pi of recentPayments.data) {
+        if (pi.status !== 'succeeded') continue;
+
+        const ledgerQuery = await db.collection('payment_ledger')
+          .where('stripePaymentId', '==', pi.id)
+          .limit(1)
+          .get();
+
+        if (ledgerQuery.empty) {
+          report.stripePaymentsNotInLedger++;
+          missingLedgerEntries.push({
+            stripePaymentId: pi.id,
+            amount: pi.amount / 100,
+            orderId: pi.metadata?.orderId || undefined,
+            customerEmail: pi.metadata?.customerEmail || pi.receipt_email || undefined,
+            createdAt: new Date(pi.created * 1000).toISOString(),
+          });
+        }
+      }
+    } catch (stripeError) {
+      console.error('Error checking Stripe payments:', stripeError);
+    }
+
     // Store the report
     const reportRef = await db.collection('reconciliation_reports').add({
       ...report,
       underpaidOrders: underpaidOrdersList,
       overpaidOrders: overpaidOrdersList,
+      missingLedgerEntries,
       generatedAt: admin.firestore.FieldValue.serverTimestamp(),
       manual: true,
     });
+
+    // Send email alert if there are issues
+    const hasIssues = report.ordersWithBalanceIssues > 0 ||
+      report.stripePaymentsNotInLedger > 0 ||
+      report.ledgerEntriesWithoutStripeVerification > 0;
+
+    if (hasIssues) {
+      await sendReconciliationAlert(report, underpaidOrdersList, overpaidOrdersList, missingLedgerEntries);
+    }
 
     res.status(200).json({
       success: true,
@@ -357,6 +430,8 @@ export const triggerReconciliation = functions.https.onRequest(async (req, res) 
       report,
       underpaidOrders: underpaidOrdersList.slice(0, 10),
       overpaidOrders: overpaidOrdersList.slice(0, 10),
+      missingLedgerEntries: missingLedgerEntries.slice(0, 10),
+      emailSent: hasIssues,
     });
   } catch (error) {
     console.error('Error running manual reconciliation:', error);

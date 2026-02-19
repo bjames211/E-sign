@@ -1,12 +1,8 @@
 import * as functions from 'firebase-functions/v1';
 import * as admin from 'firebase-admin';
-import Stripe from 'stripe';
 import { createAuditEntry } from './paymentAuditFunctions';
-
-// Initialize Stripe
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || 'sk_test_placeholder', {
-  apiVersion: '2023-10-16',
-});
+import { isValidApprovalCode } from './config/approvalCode';
+import { stripe } from './config/stripe';
 
 // ============================================================
 // PAYMENT NUMBER GENERATION
@@ -212,6 +208,7 @@ export async function calculateOrderLedgerSummary(
 
 /**
  * Update the order document with the calculated ledger summary
+ * Also syncs payment.status to match ledger reality (single source of truth)
  */
 export async function updateOrderLedgerSummary(
   orderId: string,
@@ -219,10 +216,37 @@ export async function updateOrderLedgerSummary(
 ): Promise<OrderLedgerSummary> {
   const summary = await calculateOrderLedgerSummary(orderId, db);
 
-  await db.collection('orders').doc(orderId).update({
+  // Build update data with ledger summary
+  const updateData: Record<string, unknown> = {
     ledgerSummary: summary,
     updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-  });
+  };
+
+  // Sync payment.status to match ledger reality
+  // This eliminates the dual-source-of-truth problem
+  const orderSnap = await db.collection('orders').doc(orderId).get();
+  const orderData = orderSnap.data();
+  const currentPaymentStatus = orderData?.payment?.status;
+
+  if ((summary.balanceStatus === 'paid' || summary.balanceStatus === 'overpaid') && summary.entryCount > 0) {
+    // Ledger shows fully paid AND has at least one confirmed entry
+    // The entryCount > 0 check prevents $0 deposit orders from auto-marking as paid with no money received
+    if (currentPaymentStatus !== 'paid' && currentPaymentStatus !== 'manually_approved') {
+      updateData['payment.status'] = 'paid';
+      if (!orderData?.paidAt) {
+        updateData.paidAt = admin.firestore.FieldValue.serverTimestamp();
+      }
+      console.log(`Ledger sync: Order ${orderId} payment.status updated to 'paid' (was '${currentPaymentStatus}')`);
+    }
+  } else if (summary.balanceStatus === 'underpaid') {
+    // Ledger shows underpaid — reset payment.status if it was previously paid
+    if (currentPaymentStatus === 'paid' || currentPaymentStatus === 'manually_approved') {
+      updateData['payment.status'] = 'pending';
+      console.log(`Ledger sync: Order ${orderId} payment.status updated to 'pending' (was '${currentPaymentStatus}', balance underpaid: $${summary.balance})`);
+    }
+  }
+
+  await db.collection('orders').doc(orderId).update(updateData);
 
   console.log(`Ledger summary updated for order ${orderId}: balance=$${summary.balance}, status=${summary.balanceStatus}`);
 
@@ -517,8 +541,7 @@ export const addLedgerEntry = functions.https.onRequest(async (req, res) => {
     // For manual payments with approval code, auto-approve
     const manualMethods = ['check', 'wire', 'credit_on_file', 'cash', 'other'];
     if (manualMethods.includes(data.method) && data.approvalCode) {
-      const validCode = process.env.MANAGER_APPROVAL_CODE || 'BBD2024!';
-      if (data.approvalCode === validCode || data.approvalCode.toLowerCase() === 'test') {
+      if (isValidApprovalCode(data.approvalCode)) {
         status = 'approved';
         approvedBy = data.createdBy;
       }
@@ -696,8 +719,7 @@ export const approveLedgerEntry = functions.https.onRequest(async (req, res) => 
     }
 
     // Verify approval code
-    const validCode = process.env.MANAGER_APPROVAL_CODE || 'BBD2024!';
-    if (approvalCode !== validCode && approvalCode.toLowerCase() !== 'test') {
+    if (!isValidApprovalCode(approvalCode)) {
       res.status(403).json({ error: 'Invalid approval code' });
       return;
     }
@@ -780,6 +802,20 @@ export const approveLedgerEntry = functions.https.onRequest(async (req, res) => 
     // Recalculate ledger summary
     const summary = await updateOrderLedgerSummary(entry?.orderId, db);
 
+    // Check if order should advance to ready_for_manufacturer (signed + fully paid)
+    if (summary.balanceStatus === 'paid' || summary.balanceStatus === 'overpaid') {
+      const orderRef = db.collection('orders').doc(entry?.orderId);
+      const orderSnap = await orderRef.get();
+      const orderData = orderSnap.data();
+      if (orderData?.status === 'signed') {
+        await orderRef.update({
+          status: 'ready_for_manufacturer',
+          readyForManufacturerAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+        console.log(`Order ${entry?.orderId} advanced to ready_for_manufacturer after ledger entry approval`);
+      }
+    }
+
     console.log(`Ledger entry ${entryId} (${entry?.paymentNumber}) approved by ${approvedBy || 'Manager'}`);
 
     res.status(200).json({
@@ -830,8 +866,7 @@ export const approveLegacyPayment = functions.https.onRequest(async (req, res) =
     }
 
     // Verify approval code
-    const validCode = process.env.MANAGER_APPROVAL_CODE || 'BBD2024!';
-    if (approvalCode !== validCode && approvalCode.toLowerCase() !== 'test') {
+    if (!isValidApprovalCode(approvalCode)) {
       res.status(403).json({ error: 'Invalid approval code' });
       return;
     }
@@ -898,13 +933,22 @@ export const approveLegacyPayment = functions.https.onRequest(async (req, res) =
       ...(proofFile && { proofFile }),
     }, db);
 
-    // Update the order's payment status
-    await orderRef.update({
+    // Update the order's payment status + check if ready for manufacturer
+    const legacyUpdateData: Record<string, unknown> = {
       'payment.status': 'manually_approved',
       'payment.approvedBy': approvedBy || 'Manager',
       'payment.approvedAt': admin.firestore.FieldValue.serverTimestamp(),
       paidAt: admin.firestore.FieldValue.serverTimestamp(),
-    });
+    };
+
+    // If order is signed + now paid → advance to ready_for_manufacturer
+    if (orderData?.status === 'signed') {
+      legacyUpdateData.status = 'ready_for_manufacturer';
+      legacyUpdateData.readyForManufacturerAt = admin.firestore.FieldValue.serverTimestamp();
+      console.log(`Order ${targetOrderId} advanced to ready_for_manufacturer after legacy payment approval`);
+    }
+
+    await orderRef.update(legacyUpdateData);
 
     // Recalculate ledger summary
     const summary = await updateOrderLedgerSummary(targetOrderId, db);

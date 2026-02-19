@@ -3,11 +3,8 @@ import * as admin from 'firebase-admin';
 import Stripe from 'stripe';
 import { createLedgerEntry, updateOrderLedgerSummary } from './paymentLedgerFunctions';
 import { createAuditEntry } from './paymentAuditFunctions';
-
-// Initialize Stripe
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || 'sk_test_placeholder', {
-  apiVersion: '2023-10-16',
-});
+import { isValidApprovalCode } from './config/approvalCode';
+import { stripe } from './config/stripe';
 
 // Payment types
 type PaymentMethod = 'stripe' | 'check' | 'wire' | 'credit_on_file' | 'cash' | 'other';
@@ -28,7 +25,6 @@ interface AddPaymentRequest {
   method: PaymentMethod;
   category: PaymentCategory;
   stripePaymentId?: string;
-  stripeTestMode?: boolean;
   changeOrderId?: string;
   description?: string;
   notes?: string;
@@ -117,16 +113,8 @@ export const addPaymentRecord = functions.https.onRequest(async (req, res) => {
     let stripeAmount: number | undefined;
     let stripeAmountDollars: number | undefined;
 
-    // For Stripe payments in test mode, skip verification and auto-approve
-    if (data.method === 'stripe' && data.stripeTestMode) {
-      status = 'verified';
-      stripeVerified = true;
-      stripeAmountDollars = data.amount;
-      stripeAmount = Math.round(data.amount * 100);
-      console.log(`Test mode Stripe payment: $${data.amount} for order ${data.orderNumber}`);
-    }
     // For Stripe payments, verify the payment ID
-    else if (data.method === 'stripe' && data.stripePaymentId) {
+    if (data.method === 'stripe' && data.stripePaymentId) {
       try {
         if (data.stripePaymentId.startsWith('pi_')) {
           const paymentIntent = await stripe.paymentIntents.retrieve(data.stripePaymentId);
@@ -151,8 +139,7 @@ export const addPaymentRecord = functions.https.onRequest(async (req, res) => {
     // For manual payments with approval code, auto-approve
     const manualMethods = ['check', 'wire', 'credit_on_file', 'cash', 'other'];
     if (manualMethods.includes(data.method) && data.approvalCode) {
-      const validCode = process.env.MANAGER_APPROVAL_CODE || 'BBD2024!';
-      if (data.approvalCode === validCode || data.approvalCode.toLowerCase() === 'test') {
+      if (isValidApprovalCode(data.approvalCode)) {
         status = 'approved';
       }
     }
@@ -246,8 +233,7 @@ export const approvePaymentRecord = functions.https.onRequest(async (req, res) =
     }
 
     // Verify manager approval code
-    const validCode = process.env.MANAGER_APPROVAL_CODE || 'BBD2024!';
-    if (approvalCode !== validCode && approvalCode.toLowerCase() !== 'test') {
+    if (!isValidApprovalCode(approvalCode)) {
       res.status(403).json({ error: 'Invalid manager approval code' });
       return;
     }
@@ -313,7 +299,21 @@ export const approvePaymentRecord = functions.https.onRequest(async (req, res) =
     }, db);
 
     // Update order's ledger summary
-    await updateOrderLedgerSummary(entry.orderId, db);
+    const summary = await updateOrderLedgerSummary(entry.orderId, db);
+
+    // Check if order should advance to ready_for_manufacturer (signed + fully paid)
+    if (summary.balanceStatus === 'paid' || summary.balanceStatus === 'overpaid') {
+      const orderRef = db.collection('orders').doc(entry.orderId);
+      const orderSnap = await orderRef.get();
+      const orderData = orderSnap.data();
+      if (orderData?.status === 'signed') {
+        await orderRef.update({
+          status: 'ready_for_manufacturer',
+          readyForManufacturerAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+        console.log(`Order ${entry.orderId} advanced to ready_for_manufacturer after payment approval`);
+      }
+    }
 
     console.log(`Ledger entry ${paymentId} approved by ${approvedBy}`);
 
@@ -726,6 +726,42 @@ export const chargeCardOnFile = functions.https.onRequest(async (req, res) => {
 
     if (paymentIntent.status === 'succeeded') {
       console.log(`Card charged successfully: ${paymentIntent.id} for order ${orderNumber}`);
+
+      // Create ledger entry immediately so the payment is recorded
+      // even if the payment_intent.succeeded webhook doesn't fire
+      const db = admin.firestore();
+      try {
+        // Check if webhook already created a ledger entry for this PaymentIntent
+        const existingLedger = await db.collection('payment_ledger')
+          .where('stripePaymentId', '==', paymentIntent.id)
+          .limit(1)
+          .get();
+
+        if (existingLedger.empty) {
+          await createLedgerEntry({
+            orderId,
+            orderNumber,
+            transactionType: 'payment',
+            amount,
+            method: 'stripe',
+            category: 'additional_deposit',
+            status: 'verified',
+            stripePaymentId: paymentIntent.id,
+            stripeVerified: true,
+            stripeAmount: paymentIntent.amount,
+            stripeAmountDollars: amount,
+            description: `Card on file charge for order ${orderNumber}`,
+            createdBy: 'chargeCardOnFile',
+          }, db);
+
+          await updateOrderLedgerSummary(orderId, db);
+          console.log(`Ledger entry created for card-on-file charge ${paymentIntent.id}`);
+        }
+      } catch (ledgerError) {
+        // Log but don't fail — the webhook will act as a safety net
+        console.error('Failed to create ledger entry for card charge (webhook will retry):', ledgerError);
+      }
+
       res.status(200).json({
         success: true,
         paymentId: paymentIntent.id,

@@ -53,6 +53,7 @@ export interface DepositTier {
 export interface ManufacturerConfig {
   id?: string;
   name: string;
+  sku?: string | null;
   signNowTemplateId: string;
   depositPercent?: number | null;
   depositTiers?: DepositTier[];

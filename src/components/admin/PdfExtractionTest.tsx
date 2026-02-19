@@ -13,6 +13,9 @@ interface ExtractedData {
   subtotal: number | null;
   downPayment: number | null;
   balanceDue: number | null;
+  manufacturerSku: string | null;
+  expectedSku: string | null;
+  skuMismatch: boolean;
   expectedDepositPercent: number | null;
   expectedDepositAmount: number | null;
   actualDepositPercent: number | null;
@@ -164,6 +167,45 @@ export function PdfExtractionTest() {
               <DataRow label="Subtotal" value={formatCurrency(result.subtotal)} />
               <DataRow label="Down Payment" value={formatCurrency(result.downPayment)} />
               <DataRow label="Balance Due" value={formatCurrency(result.balanceDue)} />
+            </div>
+          </div>
+
+          {/* SKU Validation */}
+          <div style={{
+            flex: '1 1 300px', border: '1px solid #e0e0e0', borderRadius: '8px', overflow: 'hidden',
+            borderColor: result.skuMismatch ? '#f44336' : '#e0e0e0',
+          }}>
+            <div style={{
+              padding: '12px 16px', fontWeight: 600, fontSize: '14px',
+              backgroundColor: result.skuMismatch ? '#ffebee' : '#f3e5f5',
+              color: result.skuMismatch ? '#c62828' : '#6a1b9a',
+            }}>
+              SKU Validation {result.skuMismatch ? '— MISMATCH' : result.expectedSku && result.manufacturerSku ? '— OK' : ''}
+            </div>
+            <div style={{ padding: '16px' }}>
+              <DataRow label="Expected SKU" value={result.expectedSku || 'Not configured'} />
+              <DataRow label="Found on PDF" value={result.manufacturerSku || 'Not found'} />
+              {result.skuMismatch && (
+                <div style={{
+                  marginTop: '12px', padding: '10px', backgroundColor: '#ffebee', borderRadius: '4px',
+                  fontSize: '13px', color: '#c62828', fontWeight: 500,
+                }}>
+                  SKU does not match — verify correct form is being used
+                </div>
+              )}
+              {!result.skuMismatch && result.expectedSku && result.manufacturerSku && (
+                <div style={{
+                  marginTop: '12px', padding: '10px', backgroundColor: '#e8f5e9', borderRadius: '4px',
+                  fontSize: '13px', color: '#2e7d32', fontWeight: 500,
+                }}>
+                  SKU matches configured value
+                </div>
+              )}
+              {!result.expectedSku && (
+                <div style={{ marginTop: '12px', fontSize: '13px', color: '#999', fontStyle: 'italic' }}>
+                  No SKU configured for this manufacturer — set one in Manufacturer Templates
+                </div>
+              )}
             </div>
           </div>
 

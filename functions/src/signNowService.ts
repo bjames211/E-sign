@@ -92,16 +92,36 @@ async function copyFieldsFromTemplate(
   );
 
   const templateFields = templateResponse.data.fields || [];
-  console.log(`Template has ${templateFields.length} fields`);
+  console.log(`Template has ${templateFields.length} total fields`);
 
   if (templateFields.length === 0) {
     console.log('No fields in template');
     return;
   }
 
+  // Only copy signature-related fields — skip text and checkbox fields
+  // that correspond to the form data already filled in on the PDF
+  const ALLOWED_FIELD_TYPES = ['signature', 'initials', 'date_signed'];
+  const ALLOWED_LABELS = ['email', 'e-mail', 'email address', 'e-mail address'];
+
+  const filteredFields = templateFields.filter((field: any) => {
+    const type = (field.type || '').toLowerCase();
+    const label = ((field.json_attributes?.label) || '').toLowerCase();
+
+    // Always include signature, initials, and date fields
+    if (ALLOWED_FIELD_TYPES.includes(type)) return true;
+
+    // Include text fields only if they're for email address
+    if (type === 'text' && ALLOWED_LABELS.some(l => label.includes(l))) return true;
+
+    return false;
+  });
+
+  console.log(`Filtered to ${filteredFields.length} signature-related fields (excluded ${templateFields.length - filteredFields.length} text/checkbox fields)`);
+
   // Copy fields from template to new document
   // SignNow stores field coordinates inside json_attributes
-  const fieldsToAdd = templateFields.map((field: any) => {
+  const fieldsToAdd = filteredFields.map((field: any) => {
     const attrs = field.json_attributes || {};
     return {
       type: field.type,

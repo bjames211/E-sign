@@ -30,10 +30,14 @@ export function Login() {
   return (
     <div style={styles.container}>
       <div style={styles.card}>
+        <div style={styles.logoWrap}>
+          <img src="/logos/big-buildings-icon.webp" alt="Big Buildings" style={styles.logoImg} />
+          <span style={styles.logoText}>Big Buildings</span>
+        </div>
         <h2 style={styles.title}>
           {isSignup ? 'Create Account' : 'Sign In'}
         </h2>
-        <p style={styles.subtitle}>E-Sign Automation Portal</p>
+        <p style={styles.subtitle}>E-Sign Portal</p>
 
         <form onSubmit={handleSubmit} style={styles.form}>
           <div style={styles.field}>
@@ -105,6 +109,23 @@ const styles: Record<string, React.CSSProperties> = {
     borderRadius: 12,
     boxShadow: '0 4px 20px rgba(0,0,0,0.1)',
   },
+  logoWrap: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 12,
+    marginBottom: 24,
+  },
+  logoImg: {
+    height: 48,
+    width: 48,
+    borderRadius: 6,
+  },
+  logoText: {
+    fontSize: 22,
+    fontWeight: 700,
+    color: '#1a3a5c',
+  },
   title: {
     margin: 0,
     fontSize: 28,
@@ -148,7 +169,7 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: 16,
     fontWeight: 600,
     color: '#fff',
-    backgroundColor: '#2196F3',
+    backgroundColor: '#1a3a5c',
     border: 'none',
     borderRadius: 8,
     cursor: 'pointer',
@@ -159,7 +180,7 @@ const styles: Record<string, React.CSSProperties> = {
     padding: 12,
     marginTop: 16,
     fontSize: 14,
-    color: '#2196F3',
+    color: '#F47B20',
     backgroundColor: 'transparent',
     border: 'none',
     cursor: 'pointer',

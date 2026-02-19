@@ -3,13 +3,9 @@ import * as admin from 'firebase-admin';
 import Stripe from 'stripe';
 import { createLedgerEntry, updateOrderLedgerSummary } from './paymentLedgerFunctions';
 import { createAuditEntry } from './paymentAuditFunctions';
-import { STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET, IS_LIVE_MODE, STRIPE_MODE } from './config/stripe';
+import { stripe, STRIPE_WEBHOOK_SECRET, IS_LIVE_MODE, STRIPE_MODE } from './config/stripe';
+import { isValidApprovalCode } from './config/approvalCode';
 import { logPaymentEvent, logPaymentEventSync, createPaymentTimer } from './utils/paymentLogger';
-
-// Initialize Stripe with configuration from config/stripe.ts
-const stripe = new Stripe(STRIPE_SECRET_KEY, {
-  apiVersion: '2023-10-16',
-});
 
 interface CreatePaymentIntentRequest {
   amount: number; // in cents
@@ -322,9 +318,15 @@ export const createPaymentLink = functions.https.onRequest(async (req, res) => {
           url: process.env.PAYMENT_SUCCESS_URL || 'https://example.com/payment-success',
         },
       },
-      // Save the payment method for future charges
+      // Save the payment method for future charges + embed orderId for webhook matching
       payment_intent_data: {
         setup_future_usage: 'off_session',
+        metadata: {
+          orderId: orderId || '',
+          customerName: customerName || '',
+          customerEmail: customerEmail || '',
+          source: 'payment_link',
+        },
       },
     };
 
@@ -785,9 +787,7 @@ export const approveManualPayment = functions.https.onRequest(async (req, res) =
     }
 
     // Verify manager approval code
-    // Also accept "test" for testing
-    const validCode = process.env.MANAGER_APPROVAL_CODE || 'BBD2024!';
-    if (approvalCode !== validCode && approvalCode.toLowerCase() !== 'test') {
+    if (!isValidApprovalCode(approvalCode)) {
       res.status(403).json({ error: 'Invalid manager approval code' });
       return;
     }
@@ -819,8 +819,30 @@ export const approveManualPayment = functions.https.onRequest(async (req, res) =
       return;
     }
 
-    // Update order with manual approval including proof file
-    await orderRef.update({
+    // CRITICAL: Create ledger entry FIRST (source of truth), then update order
+    await createLedgerEntry({
+      orderId,
+      orderNumber: orderData?.orderNumber || '',
+      transactionType: 'payment',
+      amount: amount,
+      method: paymentType as any,
+      category: 'initial_deposit',
+      status: 'approved',
+      description: `Manual payment via ${paymentType}`,
+      notes: notes || undefined,
+      proofFile: {
+        name: proofFile.name,
+        storagePath: proofFile.storagePath,
+        downloadUrl: proofFile.downloadUrl,
+        size: proofFile.size || 0,
+        type: proofFile.type || 'image/jpeg',
+      },
+      approvedBy: approvedBy || 'Manager',
+      createdBy: approvedBy || 'Manager',
+    }, db);
+
+    // Now update order - single atomic update combining payment status + order status
+    const manualUpdateData: Record<string, unknown> = {
       'payment.status': 'manually_approved',
       'payment.manualApproval': {
         approved: true,
@@ -839,46 +861,19 @@ export const approveManualPayment = functions.https.onRequest(async (req, res) =
       needsPaymentApproval: false,
       paidAt: admin.firestore.FieldValue.serverTimestamp(),
       updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-    });
+    };
 
-    // Check if order is now ready for manufacturer (signed + paid)
+    // Check if order is now ready for manufacturer (signed + paid) - combine into single update
     if (orderData?.status === 'signed') {
-      await orderRef.update({
-        status: 'ready_for_manufacturer',
-        readyForManufacturerAt: admin.firestore.FieldValue.serverTimestamp(),
-      });
+      manualUpdateData.status = 'ready_for_manufacturer';
+      manualUpdateData.readyForManufacturerAt = admin.firestore.FieldValue.serverTimestamp();
     }
 
-    // Create Payment Ledger entry (single source of truth)
-    try {
-      await createLedgerEntry({
-        orderId,
-        orderNumber: orderData?.orderNumber || '',
-        transactionType: 'payment',
-        amount: amount,
-        method: paymentType as any,
-        category: 'initial_deposit',
-        status: 'approved',
-        description: `Manual payment via ${paymentType}`,
-        notes: notes || undefined,
-        proofFile: {
-          name: proofFile.name,
-          storagePath: proofFile.storagePath,
-          downloadUrl: proofFile.downloadUrl,
-          size: proofFile.size || 0,
-          type: proofFile.type || 'image/jpeg',
-        },
-        approvedBy: approvedBy || 'Manager',
-        createdBy: approvedBy || 'Manager',
-      }, db);
+    await orderRef.update(manualUpdateData);
 
-      // Update order's ledger summary
-      await updateOrderLedgerSummary(orderId, db);
-      console.log(`Ledger entry created for manual payment on order ${orderId}`);
-    } catch (ledgerError) {
-      console.error('Error creating ledger entry:', ledgerError);
-      // Don't fail if ledger creation fails
-    }
+    // Update order's ledger summary
+    await updateOrderLedgerSummary(orderId, db);
+    console.log(`Ledger entry created for manual payment on order ${orderId}`);
 
     console.log(`Manual payment approved for order ${orderId}`);
 
@@ -977,12 +972,29 @@ export const stripeWebhook = functions.https.onRequest(async (req, res) => {
   console.log(`Received Stripe webhook: ${event.type} (${IS_LIVE_MODE ? 'LIVE' : 'TEST'} mode)`);
 
   // Idempotency check - prevent duplicate event processing
+  // Uses a transaction to atomically check-and-set, preventing race conditions
   const db = admin.firestore();
   const eventRef = db.collection('stripeEvents').doc(event.id);
 
   try {
-    const existingEvent = await eventRef.get();
-    if (existingEvent.exists) {
+    const isNewEvent = await db.runTransaction(async (transaction) => {
+      const existingEvent = await transaction.get(eventRef);
+      if (existingEvent.exists) {
+        return false; // Already processed
+      }
+      // Atomically mark as processing - no other instance can pass this check
+      transaction.set(eventRef, {
+        eventId: event.id,
+        eventType: event.type,
+        receivedAt: admin.firestore.FieldValue.serverTimestamp(),
+        status: 'processing',
+        livemode: event.livemode,
+        mode: IS_LIVE_MODE ? 'live' : 'test',
+      });
+      return true;
+    });
+
+    if (!isNewEvent) {
       logPaymentEventSync({
         action: 'webhook_duplicate',
         stripeEventId: event.id,
@@ -993,20 +1005,11 @@ export const stripeWebhook = functions.https.onRequest(async (req, res) => {
       res.status(200).json({ received: true, duplicate: true });
       return;
     }
-
-    // Record event as being processed
-    await eventRef.set({
-      eventId: event.id,
-      eventType: event.type,
-      receivedAt: admin.firestore.FieldValue.serverTimestamp(),
-      status: 'processing',
-      livemode: event.livemode,
-      mode: IS_LIVE_MODE ? 'live' : 'test',
-    });
   } catch (idempotencyError) {
-    // If we can't check/set idempotency, log but continue
-    // This handles race conditions where another instance might be processing
-    console.warn('Idempotency check failed:', idempotencyError);
+    // If transaction fails, another instance is processing this event
+    console.warn('Idempotency transaction failed (likely concurrent processing):', idempotencyError);
+    res.status(200).json({ received: true, duplicate: true });
+    return;
   }
 
   const webhookTimer = createPaymentTimer();
@@ -1043,7 +1046,43 @@ export const stripeWebhook = functions.https.onRequest(async (req, res) => {
           if (orderSnap.exists) {
             const orderData = orderSnap.data();
 
-            // Build update object - include customer ID if available
+            // CRITICAL: Create ledger entry FIRST (source of truth), then update order
+            // This ensures we never have "paid" order with no ledger entry
+            const { entryId, paymentNumber } = await createLedgerEntry({
+              orderId,
+              orderNumber: orderData?.orderNumber || '',
+              transactionType: 'payment',
+              amount: paymentIntent.amount / 100,
+              method: 'stripe',
+              category: 'initial_deposit',
+              status: 'verified',
+              stripePaymentId: paymentIntent.id,
+              stripeVerified: true,
+              stripeAmount: paymentIntent.amount,
+              stripeAmountDollars: paymentIntent.amount / 100,
+              description: 'Automatic payment via Stripe',
+              createdBy: 'stripe_webhook',
+              skipAudit: true, // We'll create custom audit entry with stripe event ID
+            }, db);
+
+            // Create audit entry with Stripe event ID
+            try {
+              await createAuditEntry({
+                ledgerEntryId: entryId,
+                paymentNumber,
+                orderId,
+                orderNumber: orderData?.orderNumber || '',
+                action: 'verified',
+                newStatus: 'verified',
+                userId: 'stripe_webhook',
+                details: `Verified via Stripe webhook (PaymentIntent: ${paymentIntent.id})`,
+                stripeEventId: event.id,
+              }, db);
+            } catch (auditErr) {
+              console.error('Failed to create audit entry:', auditErr);
+            }
+
+            // Now update order - single atomic update combining payment status + order status
             const updateData: Record<string, unknown> = {
               'payment.stripePaymentId': paymentIntent.id,
               'payment.status': 'paid',
@@ -1067,57 +1106,18 @@ export const stripeWebhook = functions.https.onRequest(async (req, res) => {
               console.log(`Saving Stripe customer ${stripeCustomerId} to order ${orderId}`);
             }
 
-            // Update payment status
-            await orderRef.update(updateData);
-
-            // Check if order is now ready for manufacturer (signed + paid)
+            // Check if order is now ready for manufacturer (signed + paid) - combine into single update
             if (orderData?.status === 'signed') {
-              await orderRef.update({
-                status: 'ready_for_manufacturer',
-                readyForManufacturerAt: admin.firestore.FieldValue.serverTimestamp(),
-              });
+              updateData.status = 'ready_for_manufacturer';
+              updateData.readyForManufacturerAt = admin.firestore.FieldValue.serverTimestamp();
               console.log(`Order ${orderId} is now ready for manufacturer`);
             }
 
-            // Create Payment Ledger entry (single source of truth)
-            try {
-              const { entryId, paymentNumber } = await createLedgerEntry({
-                orderId,
-                orderNumber: orderData?.orderNumber || '',
-                transactionType: 'payment',
-                amount: paymentIntent.amount / 100,
-                method: 'stripe',
-                category: 'initial_deposit',
-                status: 'verified',
-                stripePaymentId: paymentIntent.id,
-                stripeVerified: true,
-                stripeAmount: paymentIntent.amount,
-                stripeAmountDollars: paymentIntent.amount / 100,
-                description: 'Automatic payment via Stripe',
-                createdBy: 'stripe_webhook',
-                skipAudit: true, // We'll create custom audit entry with stripe event ID
-              }, db);
+            await orderRef.update(updateData);
 
-              // Create audit entry with Stripe event ID
-              await createAuditEntry({
-                ledgerEntryId: entryId,
-                paymentNumber,
-                orderId,
-                orderNumber: orderData?.orderNumber || '',
-                action: 'verified',
-                newStatus: 'verified',
-                userId: 'stripe_webhook',
-                details: `Verified via Stripe webhook (PaymentIntent: ${paymentIntent.id})`,
-                stripeEventId: event.id,
-              }, db);
-
-              // Update order's ledger summary
-              await updateOrderLedgerSummary(orderId, db);
-              console.log(`Ledger entry ${paymentNumber} created and verified for order ${orderId}`);
-            } catch (ledgerError) {
-              console.error('Error creating ledger entry:', ledgerError);
-              // Don't fail the webhook if ledger creation fails
-            }
+            // Update order's ledger summary
+            await updateOrderLedgerSummary(orderId, db);
+            console.log(`Ledger entry ${paymentNumber} created and verified for order ${orderId}`);
           }
         }
         break;
@@ -1192,8 +1192,70 @@ export const stripeWebhook = functions.https.onRequest(async (req, res) => {
               });
               console.log(`Set default payment method for customer ${sessionCustomerId} from checkout session`);
             }
+
+            // FALLBACK: If PaymentIntent doesn't have orderId in metadata but we know it from
+            // the payment link or session, ensure the order gets updated and ledger entry created.
+            // This handles the case where payment_intent.succeeded fires but can't find the orderId.
+            const piOrderId = paymentIntent.metadata?.orderId;
+            const fallbackOrderId = sessionOrderId || paymentLinksQuery.docs[0]?.data()?.orderId;
+
+            if (!piOrderId && fallbackOrderId && paymentIntent.status === 'succeeded') {
+              console.log(`Checkout session fallback: Creating ledger entry for order ${fallbackOrderId} from session`);
+
+              // Check if ledger entry already exists for this PaymentIntent
+              const existingLedger = await db.collection('payment_ledger')
+                .where('stripePaymentId', '==', paymentIntent.id)
+                .limit(1)
+                .get();
+
+              if (existingLedger.empty) {
+                const fallbackOrderRef = db.doc(`orders/${fallbackOrderId}`);
+                const fallbackOrderSnap = await fallbackOrderRef.get();
+                const fallbackOrderData = fallbackOrderSnap.data();
+
+                if (fallbackOrderSnap.exists && fallbackOrderData) {
+                  // Create ledger entry
+                  await createLedgerEntry({
+                    orderId: fallbackOrderId,
+                    orderNumber: fallbackOrderData.orderNumber || '',
+                    transactionType: 'payment',
+                    amount: paymentIntent.amount / 100,
+                    method: 'stripe',
+                    category: 'initial_deposit',
+                    status: 'verified',
+                    stripePaymentId: paymentIntent.id,
+                    stripeVerified: true,
+                    stripeAmount: paymentIntent.amount,
+                    stripeAmountDollars: paymentIntent.amount / 100,
+                    description: 'Payment via Payment Link (checkout session fallback)',
+                    createdBy: 'stripe_webhook',
+                  }, db);
+
+                  // Update order payment status
+                  const fallbackUpdate: Record<string, unknown> = {
+                    'payment.stripePaymentId': paymentIntent.id,
+                    'payment.status': 'paid',
+                    paidAt: admin.firestore.FieldValue.serverTimestamp(),
+                    needsPaymentApproval: false,
+                    updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+                  };
+
+                  if (fallbackOrderData.status === 'signed') {
+                    fallbackUpdate.status = 'ready_for_manufacturer';
+                    fallbackUpdate.readyForManufacturerAt = admin.firestore.FieldValue.serverTimestamp();
+                  }
+
+                  await fallbackOrderRef.update(fallbackUpdate);
+                  await updateOrderLedgerSummary(fallbackOrderId, db);
+                  console.log(`Checkout session fallback: Order ${fallbackOrderId} updated with payment`);
+                }
+              }
+            }
           } catch (pmError) {
-            console.error('Error setting default payment method from session:', pmError);
+            console.error('Error in checkout session post-processing:', pmError);
+            // Re-throw so the webhook returns 500 and Stripe retries
+            // This prevents silently losing payments when the fallback ledger creation fails
+            throw pmError;
           }
         }
         break;

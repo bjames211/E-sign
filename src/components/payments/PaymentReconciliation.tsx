@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import { Order } from '../../types/order';
 import {
   PaymentLedgerEntry,
@@ -7,7 +7,6 @@ import {
   PAYMENT_METHOD_LABELS,
 } from '../../types/payment';
 import {
-  getLedgerEntriesForOrder,
   groupLedgerEntriesByType,
   calculateGroupedTotals,
 } from '../../services/paymentService';
@@ -19,45 +18,25 @@ import { BalanceCard } from './BalanceCard';
 interface PaymentReconciliationProps {
   order: Order;
   ledgerSummary: OrderLedgerSummary;
+  ledgerEntries: PaymentLedgerEntry[];
+  loading: boolean;
   onAddPayment: () => void;
   onRefresh?: () => void;
 }
 
 export function PaymentReconciliation({
-  order,
+  order: _order,
   ledgerSummary,
+  ledgerEntries,
+  loading,
   onAddPayment,
   onRefresh,
 }: PaymentReconciliationProps) {
-  const [ledgerEntries, setLedgerEntries] = useState<PaymentLedgerEntry[]>([]);
-  const [loading, setLoading] = useState(true);
+  void _order; // kept in interface for future use
   const [error, setError] = useState<string | null>(null);
   const [approvingId, setApprovingId] = useState<string | null>(null);
   const [approvalCode, setApprovalCode] = useState<string>('');
   const [showApprovalModal, setShowApprovalModal] = useState<PaymentLedgerEntry | null>(null);
-
-  useEffect(() => {
-    if (order.id) {
-      loadLedgerEntries();
-    }
-  }, [order.id]);
-
-  const loadLedgerEntries = async () => {
-    if (!order.id) return;
-
-    setLoading(true);
-    setError(null);
-
-    try {
-      const entries = await getLedgerEntriesForOrder(order.id);
-      setLedgerEntries(entries);
-    } catch (err: any) {
-      console.error('Failed to load ledger entries:', err);
-      setError(err.message || 'Failed to load payment data');
-    } finally {
-      setLoading(false);
-    }
-  };
 
   const handleViewProof = (entry: PaymentLedgerEntry) => {
     if (entry.proofFile?.downloadUrl) {
@@ -96,10 +75,9 @@ export function PaymentReconciliation({
         throw new Error(data.error || 'Failed to approve payment');
       }
 
-      // Reload entries
-      await loadLedgerEntries();
       setShowApprovalModal(null);
 
+      // Trigger parent to reload data (entries + order)
       if (onRefresh) {
         onRefresh();
       }

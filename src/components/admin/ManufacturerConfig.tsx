@@ -1,4 +1,6 @@
 import React, { useState, useEffect } from 'react';
+import { collection, query, where, orderBy, getDocs } from 'firebase/firestore';
+import { db } from '../../config/firebase';
 import { ManufacturerConfig as ManufacturerConfigType, DepositTier } from '../../types/admin';
 import {
   subscribeToManufacturerConfigs,
@@ -144,6 +146,7 @@ export function ManufacturerConfig() {
 
   // Add form state
   const [newName, setNewName] = useState('');
+  const [newSku, setNewSku] = useState('');
   const [newTemplateId, setNewTemplateId] = useState('');
   const [newDepositMode, setNewDepositMode] = useState<DepositMode>('fixed');
   const [newDepositPercent, setNewDepositPercent] = useState('20');
@@ -151,11 +154,17 @@ export function ManufacturerConfig() {
 
   // Edit state
   const [editingId, setEditingId] = useState<string | null>(null);
+  const [editSku, setEditSku] = useState('');
   const [editTemplateId, setEditTemplateId] = useState('');
   const [editDepositMode, setEditDepositMode] = useState<DepositMode>('fixed');
   const [editDepositPercent, setEditDepositPercent] = useState('');
   const [editTiers, setEditTiers] = useState<TierRow[]>([]);
   const [editActive, setEditActive] = useState(true);
+
+  // Changelog state
+  const [showChangelogId, setShowChangelogId] = useState<string | null>(null);
+  const [changelogEntries, setChangelogEntries] = useState<any[]>([]);
+  const [loadingChangelog, setLoadingChangelog] = useState(false);
 
   // Preview state
   const [previewTemplateId, setPreviewTemplateId] = useState<string | null>(null);
@@ -208,12 +217,14 @@ export function ManufacturerConfig() {
     try {
       await saveManufacturerConfig({
         name: newName.trim(),
+        sku: newSku.trim() || null,
         signNowTemplateId: newTemplateId.trim(),
         depositPercent,
         depositTiers,
         active: true,
       });
       setNewName('');
+      setNewSku('');
       setNewTemplateId('');
       setNewDepositMode('fixed');
       setNewDepositPercent('20');
@@ -229,6 +240,7 @@ export function ManufacturerConfig() {
   const handleStartEdit = (config: ManufacturerConfigType) => {
     const mode = getDepositMode(config);
     setEditingId(config.id!);
+    setEditSku(config.sku || '');
     setEditTemplateId(config.signNowTemplateId || '');
     setEditDepositMode(mode);
     setEditDepositPercent(config.depositPercent != null ? String(config.depositPercent) : '20');
@@ -263,6 +275,7 @@ export function ManufacturerConfig() {
 
     try {
       await updateManufacturerConfig(editingId, {
+        sku: editSku.trim() || null,
         signNowTemplateId: editTemplateId.trim(),
         depositPercent,
         depositTiers: depositTiers || [],
@@ -360,6 +373,13 @@ export function ManufacturerConfig() {
           />
           <input
             type="text"
+            placeholder="SKU (e.g., EC-2024)"
+            value={newSku}
+            onChange={(e) => setNewSku(e.target.value)}
+            style={{ ...styles.input, width: '130px', fontFamily: 'monospace', fontSize: '13px' }}
+          />
+          <input
+            type="text"
             placeholder="SignNow Template ID"
             value={newTemplateId}
             onChange={(e) => setNewTemplateId(e.target.value)}
@@ -404,6 +424,7 @@ export function ManufacturerConfig() {
       <div style={styles.list}>
         <div style={styles.listHeader}>
           <span style={{ ...styles.headerCell, width: '180px' }}>Manufacturer</span>
+          <span style={{ ...styles.headerCell, width: '100px' }}>SKU</span>
           <span style={{ ...styles.headerCell, flex: 1 }}>Template ID</span>
           <span style={{ ...styles.headerCell, width: '120px' }}>Deposit</span>
           <span style={{ ...styles.headerCell, width: '70px' }}>Status</span>
@@ -424,6 +445,13 @@ export function ManufacturerConfig() {
                     <span style={{ width: '180px', fontWeight: 500, fontSize: '14px' }}>
                       {config.name}
                     </span>
+                    <input
+                      type="text"
+                      value={editSku}
+                      onChange={(e) => setEditSku(e.target.value)}
+                      placeholder="SKU"
+                      style={{ ...styles.input, width: '100px', fontFamily: 'monospace', fontSize: '12px' }}
+                    />
                     <input
                       type="text"
                       value={editTemplateId}
@@ -479,9 +507,13 @@ export function ManufacturerConfig() {
                 </div>
               ) : (
                 // View mode
-                <>
+                <div style={{ width: '100%' }}>
+                <div style={{ display: 'flex', alignItems: 'center' }}>
                   <span style={{ ...styles.cell, width: '180px', fontWeight: 500 }}>
                     {config.name}
+                  </span>
+                  <span style={{ ...styles.cell, width: '100px', fontFamily: 'monospace', fontSize: '12px', color: config.sku ? '#333' : '#ccc' }}>
+                    {config.sku || '—'}
                   </span>
                   <span
                     style={{
@@ -533,11 +565,87 @@ export function ManufacturerConfig() {
                         Preview
                       </button>
                     )}
+                    <button
+                      onClick={async () => {
+                        if (showChangelogId === config.id) {
+                          setShowChangelogId(null);
+                          return;
+                        }
+                        setShowChangelogId(config.id!);
+                        setLoadingChangelog(true);
+                        try {
+                          const q = query(
+                            collection(db, 'manufacturer_config_changelog'),
+                            where('configId', '==', config.id),
+                            orderBy('timestamp', 'desc')
+                          );
+                          const snap = await getDocs(q);
+                          setChangelogEntries(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+                        } catch (err) {
+                          console.error('Failed to load changelog:', err);
+                          setChangelogEntries([]);
+                        } finally {
+                          setLoadingChangelog(false);
+                        }
+                      }}
+                      style={{
+                        ...styles.editButton,
+                        color: showChangelogId === config.id ? '#fff' : '#795548',
+                        borderColor: '#795548',
+                        backgroundColor: showChangelogId === config.id ? '#795548' : 'transparent',
+                      }}
+                    >
+                      History
+                    </button>
                     <button onClick={() => handleDelete(config)} style={styles.deleteButton}>
                       Delete
                     </button>
                   </span>
-                </>
+                </div>
+                {showChangelogId === config.id && (
+                  <div style={{ marginTop: '10px', padding: '12px', backgroundColor: '#fafafa', borderRadius: '6px', border: '1px solid #e0e0e0' }}>
+                    <div style={{ fontSize: '13px', fontWeight: 600, marginBottom: '8px', color: '#795548' }}>Change History</div>
+                    {loadingChangelog ? (
+                      <div style={{ fontSize: '12px', color: '#999' }}>Loading...</div>
+                    ) : changelogEntries.length === 0 ? (
+                      <div style={{ fontSize: '12px', color: '#999' }}>No changes recorded yet</div>
+                    ) : (
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', maxHeight: '300px', overflowY: 'auto' }}>
+                        {changelogEntries.map((entry) => (
+                          <div key={entry.id} style={{ padding: '8px', backgroundColor: '#fff', borderRadius: '4px', border: '1px solid #eee', fontSize: '12px' }}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '4px' }}>
+                              <span style={{ fontWeight: 500, color: entry.action === 'created' ? '#2e7d32' : entry.action === 'deleted' ? '#c62828' : '#1565c0' }}>
+                                {entry.action.charAt(0).toUpperCase() + entry.action.slice(1)}
+                              </span>
+                              <span style={{ color: '#999' }}>
+                                {entry.timestamp?.toDate ? entry.timestamp.toDate().toLocaleString() : '—'}
+                              </span>
+                            </div>
+                            <div style={{ color: '#666', marginBottom: '4px' }}>by {entry.userEmail}</div>
+                            {entry.changes && entry.changes.length > 0 && (
+                              <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
+                                {entry.changes.map((c: any, i: number) => (
+                                  <div key={i} style={{ color: '#555' }}>
+                                    <span style={{ fontWeight: 500 }}>{c.field}</span>
+                                    {': '}
+                                    <span style={{ color: '#c62828', textDecoration: 'line-through' }}>
+                                      {c.oldValue != null ? (typeof c.oldValue === 'object' ? JSON.stringify(c.oldValue) : String(c.oldValue)) : 'null'}
+                                    </span>
+                                    {' → '}
+                                    <span style={{ color: '#2e7d32' }}>
+                                      {c.newValue != null ? (typeof c.newValue === 'object' ? JSON.stringify(c.newValue) : String(c.newValue)) : 'null'}
+                                    </span>
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+                </div>
               )}
             </div>
           ))

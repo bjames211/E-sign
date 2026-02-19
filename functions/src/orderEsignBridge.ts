@@ -1,17 +1,13 @@
 import * as functions from 'firebase-functions/v1';
 import * as admin from 'firebase-admin';
 import axios from 'axios';
-import Stripe from 'stripe';
 import { addDocumentToSheet } from './googleSheetsService';
 import { sendForSignature } from './signNowService';
 import { extractDataFromPdf, ExtractedPdfData } from './pdfExtractor';
 import { createLedgerEntry, updateOrderLedgerSummary } from './paymentLedgerFunctions';
-import { getDepositPercent } from './manufacturerConfigService';
-
-// Initialize Stripe
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || 'sk_test_placeholder', {
-  apiVersion: '2023-10-16',
-});
+import { getDepositPercent, getSkuForManufacturer } from './manufacturerConfigService';
+import { isValidApprovalCode } from './config/approvalCode';
+import { stripe } from './config/stripe';
 
 // Manual payment types that require manager approval
 const MANUAL_PAYMENT_TYPES = ['check', 'wire', 'credit_on_file', 'other'];
@@ -111,7 +107,8 @@ async function validateOrderWithPdf(
   let pdfData: ExtractedPdfData | null = null;
 
   try {
-    pdfData = await extractDataFromPdf(pdfBuffer, orderData.building.manufacturer);
+    const expectedSku = await getSkuForManufacturer(orderData.building.manufacturer);
+    pdfData = await extractDataFromPdf(pdfBuffer, orderData.building.manufacturer, expectedSku);
   } catch (extractError) {
     console.error('Failed to extract PDF data:', extractError);
     errors.push('Failed to extract data from PDF for validation');
@@ -152,7 +149,12 @@ async function validateOrderWithPdf(
     }
   }
 
-  // 5. CRITICAL: Check deposit percentage - requires manager approval if off
+  // 5. Check SKU/form ID mismatch (warning only, not a blocker)
+  if (pdfData.skuMismatch) {
+    warnings.push(`Form SKU mismatch: expected "${pdfData.expectedSku}", found "${pdfData.manufacturerSku}"`);
+  }
+
+  // 6. CRITICAL: Check deposit percentage - requires manager approval if off
   // Skip validation if no deposit percent is configured (variable/tiered pricing)
   const expectedPercent = await getDepositPercent(orderData.building.manufacturer, orderData.pricing.subtotalBeforeTax);
   const actualPercent = orderData.pricing.subtotalBeforeTax > 0
@@ -351,7 +353,7 @@ export const sendOrderForSignature = functions.https.onRequest(async (req, res) 
 
     // Check if manager approval bypass is requested
     const { managerApprovalCode, paymentApprovalCode, testMode } = req.body;
-    const hasPaymentApproval = paymentApprovalCode === (process.env.MANAGER_APPROVAL_CODE || 'BBD2024!') || paymentApprovalCode?.toLowerCase() === 'test';
+    const hasPaymentApproval = paymentApprovalCode ? isValidApprovalCode(paymentApprovalCode) : false;
     // Use test mode if explicitly requested OR if order was created in test mode
     const isTestMode = testMode === true || (orderData as any).isTestMode === true;
 
@@ -371,15 +373,49 @@ export const sendOrderForSignature = functions.https.onRequest(async (req, res) 
       return;
     }
 
-    // TEST MODE: Skip all validations and SignNow, just update status
+    // TEST MODE: Skip validations but still send via SignNow if PDF exists
     if (isTestMode) {
       console.log(`TEST MODE: Skipping validations for order ${orderId}`);
 
-      // Create a mock esign document record for test mode
+      // Create esign document record for test mode
       const customerName = `${orderData.customer.firstName} ${orderData.customer.lastName}`.trim();
+
+      // Try to send via SignNow if PDF is available (so customer gets the email)
+      let signNowDocId = `test_doc_${Date.now()}`;
+      let signNowInvId = `test_invite_${Date.now()}`;
+      let sentViaSignNow = false;
+
+      if (orderData.files?.orderFormPdf?.downloadUrl) {
+        try {
+          console.log('TEST MODE: PDF found, sending via SignNow for real email delivery...');
+          const pdfResponse = await axios.get(orderData.files.orderFormPdf.downloadUrl, {
+            responseType: 'arraybuffer',
+          });
+          const pdfBuffer = Buffer.from(pdfResponse.data);
+
+          const signNowResult = await sendForSignature({
+            pdfBuffer,
+            fileName: orderData.files.orderFormPdf.name || `${orderData.orderNumber}_order.pdf`,
+            signerEmail: orderData.customer.email,
+            signerName: customerName,
+            installer: orderData.building.manufacturer,
+          });
+
+          signNowDocId = signNowResult.documentId;
+          signNowInvId = signNowResult.inviteId;
+          sentViaSignNow = true;
+          console.log(`TEST MODE: SignNow document created: ${signNowDocId}, email sent to ${orderData.customer.email}`);
+        } catch (signNowError) {
+          console.warn('TEST MODE: Failed to send via SignNow, using mock IDs:', signNowError);
+          // Continue with mock IDs - don't block the test flow
+        }
+      } else {
+        console.log('TEST MODE: No PDF uploaded, using mock SignNow IDs (no email sent)');
+      }
+
       const esignDocData = {
         orderNumber: orderData.orderNumber,
-        fileName: `${orderData.orderNumber}_test_order.pdf`,
+        fileName: orderData.files?.orderFormPdf?.name || `${orderData.orderNumber}_test_order.pdf`,
         sourceType: 'order_form',
         orderId: orderId,
         signer: {
@@ -389,10 +425,11 @@ export const sendOrderForSignature = functions.https.onRequest(async (req, res) 
         installer: orderData.building.manufacturer,
         status: 'sent',
         isTestMode: true,
+        sentViaSignNow,
         createdAt: admin.firestore.FieldValue.serverTimestamp(),
         sentAt: admin.firestore.FieldValue.serverTimestamp(),
-        signNowDocumentId: `test_doc_${Date.now()}`,
-        signNowInviteId: `test_invite_${Date.now()}`,
+        signNowDocumentId: signNowDocId,
+        signNowInviteId: signNowInvId,
         formData: {
           customerName,
           customerEmail: orderData.customer.email,
@@ -402,15 +439,38 @@ export const sendOrderForSignature = functions.https.onRequest(async (req, res) 
       };
 
       const esignDocRef = await db.collection('esign_documents').add(esignDocData);
-      console.log(`TEST MODE: Created test esign_documents record: ${esignDocRef.id}`);
+      console.log(`TEST MODE: Created esign_documents record: ${esignDocRef.id}`);
 
-      // Update order status
+      // CRITICAL: Create ledger entry FIRST (source of truth), then update order
+      const isStripePayment = orderData.payment?.type?.startsWith('stripe');
+      if (isStripePayment) {
+        const depositAmount = orderData.pricing?.deposit || 0;
+        if (depositAmount > 0) {
+          await createLedgerEntry({
+            orderId,
+            orderNumber: orderData.orderNumber,
+            transactionType: 'payment',
+            amount: depositAmount,
+            method: 'stripe',
+            category: 'initial_deposit',
+            status: 'verified',
+            stripePaymentId: orderData.payment?.stripePaymentId || undefined,
+            stripeVerified: true,
+            description: `Test mode Stripe payment`,
+            createdBy: 'system',
+          }, db);
+          await updateOrderLedgerSummary(orderId, db);
+          console.log(`TEST MODE: Ledger entry created for order ${orderId}`);
+        }
+      }
+
+      // Now update order status
       await orderRef.update({
         status: 'sent_for_signature',
         esignDocumentId: esignDocRef.id,
         sentForSignatureAt: admin.firestore.FieldValue.serverTimestamp(),
         isTestMode: true,
-        'payment.status': orderData.payment?.type?.startsWith('stripe') ? 'paid' : orderData.payment?.status,
+        'payment.status': isStripePayment ? 'paid' : orderData.payment?.status,
       });
 
       console.log(`TEST MODE: Order ${orderId} marked as sent_for_signature`);
@@ -418,7 +478,10 @@ export const sendOrderForSignature = functions.https.onRequest(async (req, res) 
       res.status(200).json({
         success: true,
         testMode: true,
-        message: 'TEST MODE: Order marked as sent for signature (no actual e-sign sent)',
+        sentViaSignNow,
+        message: sentViaSignNow
+          ? 'TEST MODE: Order sent for signature via SignNow (email sent to customer)'
+          : 'TEST MODE: Order marked as sent for signature (no PDF, no email sent)',
         orderId,
         esignDocumentId: esignDocRef.id,
       });
@@ -516,7 +579,27 @@ export const sendOrderForSignature = functions.https.onRequest(async (req, res) 
         return;
       }
 
-      // Payment verified - mark as paid and save customer ID for future charges
+      // CRITICAL: Create ledger entry FIRST (source of truth), then update order
+      const paymentAmountDollars = stripeVerification.paymentAmountDollars || orderData.pricing.deposit;
+      await createLedgerEntry({
+        orderId,
+        orderNumber: orderData.orderNumber,
+        transactionType: 'payment',
+        amount: paymentAmountDollars,
+        method: 'stripe',
+        category: 'initial_deposit',
+        status: 'verified',
+        stripePaymentId: orderData.payment?.stripePaymentId || undefined,
+        stripeVerified: true,
+        stripeAmount: stripeVerification.paymentAmount,
+        stripeAmountDollars: stripeVerification.paymentAmountDollars,
+        description: `Stripe payment verified`,
+        createdBy: 'system',
+      }, db);
+      await updateOrderLedgerSummary(orderId, db);
+      console.log(`Ledger entry created for Stripe payment on order ${orderId}`);
+
+      // Now update order status
       const paymentUpdateData: Record<string, unknown> = {
         'payment.status': 'paid',
         paidAt: admin.firestore.FieldValue.serverTimestamp(),
@@ -530,7 +613,7 @@ export const sendOrderForSignature = functions.https.onRequest(async (req, res) 
       await orderRef.update(paymentUpdateData);
       console.log(`Stripe payment verified for order ${orderId}`);
     }
-    const hasManagerApproval = managerApprovalCode === process.env.MANAGER_APPROVAL_CODE || managerApprovalCode?.toLowerCase() === 'test';
+    const hasManagerApproval = managerApprovalCode ? isValidApprovalCode(managerApprovalCode) : false;
 
     // Download the PDF from Firebase Storage (we've validated it exists above for non-test mode)
     console.log('Downloading PDF from:', orderData.files.orderFormPdf!.downloadUrl);
@@ -568,6 +651,9 @@ export const sendOrderForSignature = functions.https.onRequest(async (req, res) 
             subtotal: validation.pdfData.subtotal,
             deposit: validation.pdfData.downPayment,
             depositPercent: validation.pdfData.actualDepositPercent,
+            manufacturerSku: validation.pdfData.manufacturerSku,
+            expectedSku: validation.pdfData.expectedSku,
+            skuMismatch: validation.pdfData.skuMismatch,
           } : null,
           warnings: validation.warnings,
           errors: validation.errors,
@@ -644,6 +730,9 @@ export const sendOrderForSignature = functions.https.onRequest(async (req, res) 
         subtotal: validation.pdfData.subtotal,
         downPayment: validation.pdfData.downPayment,
         balanceDue: validation.pdfData.balanceDue,
+        manufacturerSku: validation.pdfData.manufacturerSku,
+        expectedSku: validation.pdfData.expectedSku,
+        skuMismatch: validation.pdfData.skuMismatch,
         expectedDepositPercent: validation.pdfData.expectedDepositPercent,
         actualDepositPercent: validation.pdfData.actualDepositPercent,
         depositDiscrepancy: validation.pdfData.depositDiscrepancy,
@@ -678,7 +767,7 @@ export const sendOrderForSignature = functions.https.onRequest(async (req, res) 
       console.log('Sending PDF to SignNow...');
       signNowResult = await sendForSignature({
         pdfBuffer,
-        fileName: orderData.files.orderFormPdf!.name,
+        fileName: orderData.files.orderFormPdf!.name || `${orderData.orderNumber}_order.pdf`,
         signerEmail: orderData.customer.email,
         signerName: customerName,
         installer: orderData.building.manufacturer,
@@ -746,7 +835,7 @@ export const sendOrderForSignature = functions.https.onRequest(async (req, res) 
 
       await addDocumentToSheet({
         orderNumber: orderData.orderNumber,
-        fileName: orderData.files.orderFormPdf!.name,
+        fileName: orderData.files.orderFormPdf!.name || `${orderData.orderNumber}_order.pdf`,
         signerName: customerName,
         signerEmail: orderData.customer.email,
         installer: orderData.building.manufacturer,
@@ -898,8 +987,6 @@ export async function updateOrderOnSigned(esignDocumentId: string): Promise<void
   if (changeOrderId) {
     console.log(`This is a change order signature. Updating change order: ${changeOrderId}`);
     const changeOrderRef = db.collection('change_orders').doc(changeOrderId);
-    const changeOrderSnap = await changeOrderRef.get();
-    const changeOrderData = changeOrderSnap.data();
 
     await changeOrderRef.update({
       status: 'signed',
@@ -907,33 +994,15 @@ export async function updateOrderOnSigned(esignDocumentId: string): Promise<void
     });
     console.log(`Change order ${changeOrderId} marked as signed`);
 
-    // Create ledger entry for deposit adjustment if there's a difference
-    if (changeOrderData?.differences?.depositDiff && changeOrderData.differences.depositDiff !== 0) {
-      const depositDiff = changeOrderData.differences.depositDiff;
-      const transactionType = depositDiff > 0 ? 'deposit_increase' : 'deposit_decrease';
-
-      try {
-        await createLedgerEntry({
-          orderId: orderRef.id,
-          orderNumber: orderData.orderNumber,
-          changeOrderId: changeOrderId,
-          changeOrderNumber: changeOrderData.changeOrderNumber,
-          transactionType: transactionType as any,
-          amount: Math.abs(depositDiff),
-          method: 'other',
-          category: 'change_order_adjustment',
-          status: 'approved',
-          description: `Deposit ${depositDiff > 0 ? 'increase' : 'decrease'} from ${changeOrderData.changeOrderNumber}`,
-          createdBy: 'esign_webhook',
-        }, db);
-
-        // Update ledger summary
-        await updateOrderLedgerSummary(orderRef.id, db);
-        console.log(`Ledger entry created for change order ${changeOrderId} deposit adjustment: $${depositDiff}`);
-      } catch (ledgerError) {
-        console.error('Error creating ledger entry for change order:', ledgerError);
-        // Don't fail the webhook if ledger creation fails
-      }
+    // Note: deposit_increase/decrease ledger entries are informational only —
+    // depositRequired is calculated from order.pricing.deposit (updated by sendChangeOrderForSignature).
+    // Payment/refund entries for the deposit difference are created at send time in sendChangeOrderForSignature.
+    // Recalculate ledger summary to reflect updated pricing.
+    try {
+      await updateOrderLedgerSummary(orderRef.id, db);
+      console.log(`Ledger summary recalculated for change order ${changeOrderId} signing`);
+    } catch (ledgerError) {
+      console.error('Error recalculating ledger summary for change order:', ledgerError);
     }
   }
 
@@ -1679,13 +1748,26 @@ export const testSignOrder = functions.https.onRequest(async (req, res) => {
       return;
     }
 
-    // Update order to signed status
-    await orderRef.update({
-      status: 'signed',
+    // Check if payment is already complete to determine final status
+    const paymentStatus = orderData.payment?.status;
+    const paymentType = orderData.payment?.type;
+    const isPaid = paymentStatus === 'paid' ||
+                   paymentStatus === 'manually_approved' ||
+                   (!paymentStatus && paymentType?.startsWith('stripe_'));
+
+    const finalStatus = isPaid ? 'ready_for_manufacturer' : 'signed';
+
+    // Update order status
+    const orderUpdate: Record<string, unknown> = {
+      status: finalStatus,
       signedAt: admin.firestore.FieldValue.serverTimestamp(),
       testSignedAt: admin.firestore.FieldValue.serverTimestamp(),
       updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-    });
+    };
+    if (finalStatus === 'ready_for_manufacturer') {
+      orderUpdate.readyForManufacturerAt = admin.firestore.FieldValue.serverTimestamp();
+    }
+    await orderRef.update(orderUpdate);
 
     // Update esign document if exists
     if (orderData.esignDocumentId) {
@@ -1697,12 +1779,13 @@ export const testSignOrder = functions.https.onRequest(async (req, res) => {
       });
     }
 
-    console.log(`TEST MODE: Order ${orderId} marked as signed`);
+    console.log(`TEST MODE: Order ${orderId} marked as ${finalStatus}`);
 
     res.status(200).json({
       success: true,
-      message: 'TEST MODE: Order marked as signed',
+      message: `TEST MODE: Order marked as ${finalStatus}`,
       orderId,
+      status: finalStatus,
     });
   } catch (error) {
     console.error('Error test signing order:', error);
@@ -1788,33 +1871,12 @@ export const testSignChangeOrder = functions.https.onRequest(async (req, res) =>
       updatedAt: admin.firestore.FieldValue.serverTimestamp(),
     });
 
-    // Create ledger entry for deposit adjustment if there's a difference
-    if (changeOrderData.differences?.depositDiff && changeOrderData.differences.depositDiff !== 0) {
-      const depositDiff = changeOrderData.differences.depositDiff;
-      const transactionType = depositDiff > 0 ? 'deposit_increase' : 'deposit_decrease';
-
-      try {
-        await createLedgerEntry({
-          orderId: changeOrderData.orderId,
-          orderNumber: orderData?.orderNumber || '',
-          changeOrderId: changeOrderId,
-          changeOrderNumber: changeOrderData.changeOrderNumber,
-          transactionType: transactionType as any,
-          amount: Math.abs(depositDiff),
-          method: 'other',
-          category: 'change_order_adjustment',
-          status: 'approved',
-          description: `Deposit ${depositDiff > 0 ? 'increase' : 'decrease'} from ${changeOrderData.changeOrderNumber} (test mode)`,
-          createdBy: 'test_sign',
-        }, db);
-
-        // Update ledger summary
-        await updateOrderLedgerSummary(changeOrderData.orderId, db);
-        console.log(`TEST MODE: Ledger entry created for change order deposit adjustment: $${depositDiff}`);
-      } catch (ledgerError) {
-        console.error('Error creating ledger entry for test change order:', ledgerError);
-        // Don't fail if ledger creation fails
-      }
+    // Recalculate ledger summary to reflect updated pricing from change order
+    try {
+      await updateOrderLedgerSummary(changeOrderData.orderId, db);
+      console.log(`TEST MODE: Ledger summary recalculated for change order ${changeOrderId}`);
+    } catch (ledgerError) {
+      console.error('Error recalculating ledger summary for test change order:', ledgerError);
     }
 
     // Update esign document if exists

@@ -354,11 +354,15 @@ export async function updateOrder(
     };
   }
   if (formData.payment) {
-    updates.payment = {
-      type: formData.payment.type,
-      ...(formData.payment.stripePaymentId && { stripePaymentId: formData.payment.stripePaymentId }),
-      ...(formData.payment.notes && { notes: formData.payment.notes }),
-    };
+    // Use dot-notation to update individual payment fields without overwriting
+    // existing fields like payment.status, payment.stripeVerification, etc.
+    updates['payment.type'] = formData.payment.type;
+    if (formData.payment.stripePaymentId) {
+      updates['payment.stripePaymentId'] = formData.payment.stripePaymentId;
+    }
+    if (formData.payment.notes) {
+      updates['payment.notes'] = formData.payment.notes;
+    }
   }
   if (formData.salesPerson !== undefined) {
     updates.salesPerson = formData.salesPerson;

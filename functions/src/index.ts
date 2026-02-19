@@ -5,6 +5,7 @@ import * as functions from 'firebase-functions/v1';
 import * as admin from 'firebase-admin';
 import { sendForSignature, downloadSignedDocument, cancelSigningInvite, resendSigningInvite, sendSignatureReminder } from './signNowService';
 import { extractDataFromPdf } from './pdfExtractor';
+import { getSkuForManufacturer } from './manufacturerConfigService';
 import { addDocumentToSheet, updateSheetOnSigned } from './googleSheetsService';
 import { seedAdminOptions, seedMockQuotes, seedBulkQuotes, seedTestOrders, seedPartialPaymentOrders, seedOverpaidOrders, seedManufacturerConfig } from './seedData';
 import {
@@ -23,10 +24,9 @@ import {
   verifyStripePaymentRecord,
   rejectPaymentRecord,
   getPaymentsForOrder,
-  recalculatePaymentSummary,
   chargeCardOnFile,
 } from './paymentFunctions';
-import { sendOrderForSignature, updateOrderOnSigned, migrateOrderPaymentStatus, syncOrderStatusFromEsign, sendChangeOrderForSignature, testSignOrder, testSignChangeOrder } from './orderEsignBridge';
+import { sendOrderForSignature, updateOrderOnSigned, syncOrderStatusFromEsign, sendChangeOrderForSignature, testSignOrder, testSignChangeOrder } from './orderEsignBridge';
 import {
   addLedgerEntry,
   voidLedgerEntry,
@@ -84,7 +84,8 @@ export {
 };
 
 // Export Order-to-ESign bridge functions
-export { sendOrderForSignature, migrateOrderPaymentStatus, sendChangeOrderForSignature, testSignOrder, testSignChangeOrder };
+export { sendOrderForSignature, sendChangeOrderForSignature, testSignOrder, testSignChangeOrder };
+// migrateOrderPaymentStatus removed — migration is complete, endpoint was unprotected
 
 // Export Payment functions
 export {
@@ -93,7 +94,7 @@ export {
   verifyStripePaymentRecord,
   rejectPaymentRecord,
   getPaymentsForOrder,
-  recalculatePaymentSummary,
+  // recalculatePaymentSummary removed — use recalculateLedgerSummary instead
   chargeCardOnFile,
 };
 
@@ -241,7 +242,8 @@ export const previewPdfExtraction = functions.runWith({ timeoutSeconds: 120, mem
 
   try {
     const pdfBuffer = Buffer.from(pdfBase64, 'base64');
-    const extracted = await extractDataFromPdf(pdfBuffer, manufacturer);
+    const expectedSku = await getSkuForManufacturer(manufacturer);
+    const extracted = await extractDataFromPdf(pdfBuffer, manufacturer, expectedSku);
     res.json({
       success: true,
       data: {
@@ -255,6 +257,9 @@ export const previewPdfExtraction = functions.runWith({ timeoutSeconds: 120, mem
         subtotal: extracted.subtotal,
         downPayment: extracted.downPayment,
         balanceDue: extracted.balanceDue,
+        manufacturerSku: extracted.manufacturerSku,
+        expectedSku: extracted.expectedSku,
+        skuMismatch: extracted.skuMismatch,
         expectedDepositPercent: extracted.expectedDepositPercent,
         expectedDepositAmount: extracted.expectedDepositAmount,
         actualDepositPercent: extracted.actualDepositPercent,
@@ -461,6 +466,49 @@ export const cancelSignature = functions.https.onRequest(async (req, res) => {
   } catch (error: any) {
     console.error('Error cancelling signature:', error);
     res.status(500).json({ error: error.message || 'Failed to cancel signature' });
+  }
+});
+
+/**
+ * Reset an order to draft and re-trigger sendOrderForSignature.
+ * Used when a test mode order needs to be resent with real SignNow delivery.
+ */
+export const resendOrderForSignature = functions.https.onRequest(async (req, res) => {
+  res.set('Access-Control-Allow-Origin', '*');
+  res.set('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.set('Access-Control-Allow-Headers', 'Content-Type');
+
+  if (req.method === 'OPTIONS') { res.status(204).send(''); return; }
+  if (req.method !== 'POST') { res.status(405).json({ error: 'Method not allowed' }); return; }
+
+  try {
+    const db = admin.firestore();
+    const { orderId } = req.body;
+    if (!orderId) { res.status(400).json({ error: 'orderId is required' }); return; }
+
+    const orderRef = db.doc(`orders/${orderId}`);
+    const orderSnap = await orderRef.get();
+    if (!orderSnap.exists) { res.status(404).json({ error: 'Order not found' }); return; }
+
+    const orderData = orderSnap.data()!;
+    console.log(`Resending order ${orderId} (${orderData.orderNumber}), current status: ${orderData.status}`);
+
+    // Reset to draft so sendOrderForSignature accepts it
+    await orderRef.update({ status: 'draft' });
+    console.log('Order reset to draft');
+
+    // Forward to sendOrderForSignature via internal HTTP call
+    const axios = require('axios');
+    const functionUrl = `https://us-central1-e-sign-27f9a.cloudfunctions.net/sendOrderForSignature`;
+    const sendResult = await axios.post(functionUrl, { orderId }, {
+      headers: { 'Content-Type': 'application/json' },
+    });
+
+    console.log('sendOrderForSignature result:', JSON.stringify(sendResult.data));
+    res.status(200).json(sendResult.data);
+  } catch (error: any) {
+    console.error('Error resending order for signature:', error?.response?.data || error.message);
+    res.status(500).json({ error: error?.response?.data?.error || error.message || 'Failed to resend' });
   }
 });
 
@@ -708,6 +756,19 @@ export const processEsignDocument = functions.firestore
 
     if (!data) {
       console.log('No data in snapshot');
+      return;
+    }
+
+    // Skip test mode documents — they don't need SignNow processing
+    if (data.isTestMode) {
+      console.log(`Skipping test mode document: ${docId}`);
+      return;
+    }
+
+    // Skip documents created by sendOrderForSignature / sendChangeOrderForSignature
+    // — those flows handle SignNow sending themselves
+    if (data.sourceType === 'order_form' || data.sourceType === 'change_order') {
+      console.log(`Skipping ${data.sourceType} document: ${docId} (handled by order flow)`);
       return;
     }
 

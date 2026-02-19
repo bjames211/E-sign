@@ -24,7 +24,7 @@ interface PaymentSectionProps {
 
 export function PaymentSection({ order, onRefresh }: PaymentSectionProps) {
   const [payments, setPayments] = useState<PaymentRecord[]>([]);
-  const [_ledgerEntries, setLedgerEntries] = useState<PaymentLedgerEntry[]>([]);
+  const [ledgerEntries, setLedgerEntries] = useState<PaymentLedgerEntry[]>([]);
   const [summary, setSummary] = useState<PaymentSummary | null>(null);
   const [ledgerSummary, setLedgerSummary] = useState<OrderLedgerSummary | null>(null);
   const [loading, setLoading] = useState(true);
@@ -337,8 +337,10 @@ export function PaymentSection({ order, onRefresh }: PaymentSectionProps) {
         <PaymentReconciliation
           order={order}
           ledgerSummary={order.ledgerSummary}
+          ledgerEntries={ledgerEntries}
+          loading={loading}
           onAddPayment={() => setShowAddModal(true)}
-          onRefresh={onRefresh}
+          onRefresh={() => { loadPayments(); onRefresh?.(); }}
         />
 
         {/* Add Payment Modal */}

@@ -100,6 +100,12 @@ if (!STRIPE_SECRET_KEY.includes('placeholder')) {
   }
 }
 
+// Shared Stripe instance — import this instead of creating new Stripe() in each file
+import Stripe from 'stripe';
+export const stripe = new Stripe(STRIPE_SECRET_KEY, {
+  apiVersion: '2023-10-16',
+});
+
 // Export configuration summary (safe to log, no secrets)
 export const STRIPE_CONFIG = {
   mode: STRIPE_MODE,

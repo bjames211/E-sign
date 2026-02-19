@@ -1,11 +1,6 @@
 import * as functions from 'firebase-functions/v1';
 import * as admin from 'firebase-admin';
-import Stripe from 'stripe';
-
-// Initialize Stripe
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || 'sk_test_placeholder', {
-  apiVersion: '2023-10-16',
-});
+import { stripe } from './config/stripe';
 
 // ============================================================
 // STRIPE RECONCILIATION TOOL
@@ -338,6 +333,22 @@ export const fixLedgerEntryAmount = functions.https.onRequest(async (req, res) =
       correctedBy,
       correctionReason: reason,
       originalAmount,
+    });
+
+    // Create audit trail entry
+    await db.collection('payment_audit_log').add({
+      orderId: entry.orderId,
+      orderNumber: entry.orderNumber || '',
+      action: 'ledger_amount_corrected',
+      details: {
+        entryId,
+        originalAmount,
+        correctAmount,
+        reason,
+        stripePaymentId: entry.stripePaymentId || null,
+      },
+      performedBy: correctedBy,
+      timestamp: admin.firestore.FieldValue.serverTimestamp(),
     });
 
     // Recalculate order's ledger summary

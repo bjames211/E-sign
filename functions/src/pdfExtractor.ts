@@ -16,6 +16,10 @@ export interface ExtractedPdfData {
   subtotal: number | null;
   downPayment: number | null;
   balanceDue: number | null;
+  // SKU matching fields
+  manufacturerSku: string | null;
+  expectedSku: string | null;
+  skuMismatch: boolean;
   // Deposit validation fields
   expectedDepositPercent: number | null;
   expectedDepositAmount: number | null;
@@ -32,7 +36,8 @@ export interface ExtractedPdfData {
  */
 export async function extractDataFromPdf(
   pdfBuffer: Buffer,
-  installer: string
+  installer: string,
+  expectedSku?: string | null
 ): Promise<ExtractedPdfData> {
   console.log('Extracting data from PDF using Claude Vision...');
   console.log('Installer:', installer);
@@ -70,7 +75,8 @@ export async function extractDataFromPdf(
   "phone": "phone number",
   "subtotal": numeric value (no $ sign),
   "downPayment": numeric value (no $ sign) - NOTE: For American Carports, this may be labeled "Origination Fee" instead of "Down Payment" or "Deposit",
-  "balanceDue": numeric value (no $ sign)
+  "balanceDue": numeric value (no $ sign),
+  "formId": "any form identifier, SKU, form number, version number, or document code printed on the form (look in headers, footers, corners, watermarks). Examples: 'EC-2024', 'Form 100', 'v2.3', 'REV-A'. Return null if none found."
 }
 
 Return ONLY the JSON, no other text.`,
@@ -104,6 +110,17 @@ Return ONLY the JSON, no other text.`,
     const subtotal = parsed.subtotal ? Number(parsed.subtotal) : null;
     const downPayment = parsed.downPayment ? Number(parsed.downPayment) : null;
 
+    // SKU matching
+    const extractedSku: string | null = parsed.formId || null;
+    const skuMismatch = !!(expectedSku && extractedSku &&
+      extractedSku.toLowerCase() !== expectedSku.toLowerCase());
+
+    if (skuMismatch) {
+      console.log(`WARNING: SKU MISMATCH for ${installer}:`);
+      console.log(`   Expected SKU: ${expectedSku}`);
+      console.log(`   Found on PDF: ${extractedSku}`);
+    }
+
     // Calculate deposit validation (skip if no percent configured for this manufacturer)
     const expectedPercent = await getDepositPercent(installer, subtotal || 0);
     let expectedAmount: number | null = null;
@@ -122,7 +139,7 @@ Return ONLY the JSON, no other text.`,
         if (difference > 1) {
           depositDiscrepancy = true;
           discrepancyAmount = Math.round((downPayment - expectedAmount) * 100) / 100;
-          console.log(`⚠️ DEPOSIT DISCREPANCY for ${installer}:`);
+          console.log(`WARNING: DEPOSIT DISCREPANCY for ${installer}:`);
           console.log(`   Expected: $${expectedAmount} (${expectedPercent}%)`);
           console.log(`   Actual: $${downPayment} (${actualPercent}%)`);
           console.log(`   Difference: $${discrepancyAmount}`);
@@ -141,6 +158,9 @@ Return ONLY the JSON, no other text.`,
       subtotal,
       downPayment,
       balanceDue: parsed.balanceDue ? Number(parsed.balanceDue) : null,
+      manufacturerSku: extractedSku,
+      expectedSku: expectedSku || null,
+      skuMismatch,
       expectedDepositPercent: expectedPercent,
       expectedDepositAmount: expectedAmount,
       actualDepositPercent: actualPercent,

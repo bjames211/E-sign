@@ -1,12 +1,7 @@
 import * as functions from 'firebase-functions/v1';
 import * as admin from 'firebase-admin';
-import Stripe from 'stripe';
 import { createLedgerEntry, updateOrderLedgerSummary } from './paymentLedgerFunctions';
-
-// Initialize Stripe
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || 'sk_test_placeholder', {
-  apiVersion: '2023-10-16',
-});
+import { stripe } from './config/stripe';
 
 // ============================================================
 // PREPAID CREDIT TYPES
@@ -274,26 +269,16 @@ export const applyPrepaidCreditToOrder = functions.https.onRequest(async (req, r
 
     const order = orderSnap.data();
 
-    // Use a transaction to ensure atomicity
+    // Mark credit as applied FIRST using a transaction to prevent double-apply
+    // Then create ledger entry outside the transaction (since createLedgerEntry has its own writes)
     await db.runTransaction(async (transaction) => {
-      // Create ledger entry for the payment
-      const { entryId } = await createLedgerEntry({
-        orderId,
-        orderNumber: order?.orderNumber || '',
-        transactionType: 'payment',
-        amount: credit.amount,
-        method: credit.method as any,
-        category: 'initial_deposit',
-        status: credit.stripeVerified || credit.method !== 'stripe' ? 'verified' : 'approved',
-        stripePaymentId: credit.stripePaymentId,
-        stripeVerified: credit.stripeVerified,
-        description: `Applied prepaid credit from ${credit.customerName}`,
-        notes: credit.notes,
-        proofFile: credit.proofFile,
-        createdBy: appliedBy,
-      }, db);
+      // Re-read credit inside transaction to ensure it's still available
+      const freshCreditSnap = await transaction.get(creditRef);
+      if (!freshCreditSnap.exists || freshCreditSnap.data()?.status !== 'available') {
+        throw new Error('Credit is no longer available (may have been applied concurrently)');
+      }
 
-      // Mark credit as applied
+      // Mark credit as applied atomically
       transaction.update(creditRef, {
         status: 'applied',
         appliedToOrderId: orderId,
@@ -301,9 +286,29 @@ export const applyPrepaidCreditToOrder = functions.https.onRequest(async (req, r
         appliedAt: admin.firestore.FieldValue.serverTimestamp(),
         appliedBy,
       });
-
-      console.log(`Prepaid credit ${creditId} applied to order ${orderId}, ledger entry: ${entryId}`);
     });
+
+    // Now create the ledger entry outside the transaction
+    // If this fails, the credit is marked applied but no ledger entry exists —
+    // the daily reconciliation will catch this, and it's safer than the reverse
+    // (ledger entry exists but credit still shows 'available' → double-apply risk)
+    const { entryId } = await createLedgerEntry({
+      orderId,
+      orderNumber: order?.orderNumber || '',
+      transactionType: 'payment',
+      amount: credit.amount,
+      method: credit.method as any,
+      category: 'initial_deposit',
+      status: credit.stripeVerified || credit.method !== 'stripe' ? 'verified' : 'approved',
+      stripePaymentId: credit.stripePaymentId,
+      stripeVerified: credit.stripeVerified,
+      description: `Applied prepaid credit from ${credit.customerName}`,
+      notes: credit.notes,
+      proofFile: credit.proofFile,
+      createdBy: appliedBy,
+    }, db);
+
+    console.log(`Prepaid credit ${creditId} applied to order ${orderId}, ledger entry: ${entryId}`);
 
     // Update the order's ledger summary
     const summary = await updateOrderLedgerSummary(orderId, db);

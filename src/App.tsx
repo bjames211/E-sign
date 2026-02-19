@@ -150,7 +150,10 @@ function AppContent() {
     <div style={styles.container}>
       <header className="app-header" style={styles.header}>
         <div className="app-header-left" style={styles.headerLeft}>
-          <h1 style={styles.logo}>BBD E-Sign</h1>
+          <div style={styles.logoWrap}>
+            <img src="/logos/big-buildings-icon.webp" alt="Big Buildings" style={styles.logoImg} />
+            <span style={styles.logoText}>Big Buildings</span>
+          </div>
           <nav className="app-nav" style={styles.nav}>
             {/* Manager-only: Upload PDF */}
             {isManager && (
@@ -341,7 +344,7 @@ const styles: Record<string, React.CSSProperties> = {
     alignItems: 'center',
     padding: '0 30px',
     height: 64,
-    backgroundColor: '#2196F3',
+    backgroundColor: '#1a3a5c',
     color: '#fff',
   },
   headerLeft: {
@@ -349,10 +352,20 @@ const styles: Record<string, React.CSSProperties> = {
     alignItems: 'center',
     gap: 40,
   },
-  logo: {
-    margin: 0,
-    fontSize: 20,
+  logoWrap: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 10,
+  },
+  logoImg: {
+    height: 40,
+    width: 40,
+    borderRadius: 4,
+  },
+  logoText: {
+    fontSize: 18,
     fontWeight: 700,
+    color: '#fff',
   },
   nav: {
     display: 'flex',
@@ -405,8 +418,8 @@ const styles: Record<string, React.CSSProperties> = {
   logoutButton: {
     padding: '8px 16px',
     fontSize: 14,
-    color: '#2196F3',
-    backgroundColor: '#fff',
+    color: '#fff',
+    backgroundColor: '#F47B20',
     border: 'none',
     borderRadius: 6,
     cursor: 'pointer',

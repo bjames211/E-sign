@@ -7,6 +7,7 @@ export interface DepositTier {
 
 export interface ManufacturerConfigData {
   name: string;
+  sku?: string | null;
   signNowTemplateId: string;
   depositPercent?: number | null;
   depositTiers?: DepositTier[];
@@ -103,6 +104,12 @@ export async function getDepositConfigs(): Promise<Record<string, DepositConfigE
     }
   });
   return result;
+}
+
+export async function getSkuForManufacturer(manufacturer: string): Promise<string | null> {
+  const configs = await getManufacturerConfigs();
+  const config = findConfig(configs, manufacturer);
+  return config?.sku || null;
 }
 
 export function clearConfigCache(): void {

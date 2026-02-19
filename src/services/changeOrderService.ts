@@ -17,7 +17,6 @@ import { db, storage } from '../config/firebase';
 import {
   ChangeOrder,
   ChangeOrderFormData,
-  ChangeOrderStatus,
   ChangeOrderFiles,
   ChangeOrderPendingFiles,
   PricingSnapshot,
@@ -451,6 +450,7 @@ export async function getChangeOrdersForOrder(orderId: string): Promise<ChangeOr
 }
 
 // Cancel a change order
+// Rolls back pricing to previous values and cancels SignNow invite if pending
 export async function cancelChangeOrder(
   changeOrderId: string,
   reason: string
@@ -468,6 +468,27 @@ export async function cancelChangeOrder(
     throw new Error('Cannot cancel a signed change order');
   }
 
+  // Cancel SignNow invite if the CO was pending signature
+  if (changeOrder.status === 'pending_signature' && changeOrder.esignDocumentId) {
+    try {
+      const response = await fetch(
+        `${import.meta.env.VITE_FUNCTIONS_URL || ''}/cancelSignature`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ orderId: changeOrder.orderId }),
+        }
+      );
+      const result = await response.json();
+      if (!result.success) {
+        console.warn('Failed to cancel SignNow invite:', result.error);
+      }
+    } catch (err) {
+      console.warn('Error cancelling SignNow invite:', err);
+    }
+  }
+
+  // Mark the change order as cancelled
   await updateDoc(changeOrderRef, {
     status: 'cancelled',
     cancelledAt: serverTimestamp(),
@@ -475,82 +496,52 @@ export async function cancelChangeOrder(
     updatedAt: serverTimestamp(),
   });
 
-  // Clear the active change order on the parent order
+  // Rollback parent order pricing to previous values and clear active CO
   const orderRef = doc(db, ORDERS_COLLECTION, changeOrder.orderId);
-  await updateDoc(orderRef, {
+  const orderSnap = await getDoc(orderRef);
+  const orderData = orderSnap.exists() ? orderSnap.data() : null;
+
+  const orderUpdate: Record<string, unknown> = {
     activeChangeOrderId: null,
     activeChangeOrderStatus: null,
     updatedAt: serverTimestamp(),
-  });
-}
-
-// Update change order status
-export async function updateChangeOrderStatus(
-  changeOrderId: string,
-  status: ChangeOrderStatus,
-  additionalData?: Record<string, unknown>
-): Promise<void> {
-  const docRef = doc(db, CHANGE_ORDERS_COLLECTION, changeOrderId);
-  await updateDoc(docRef, {
-    status,
-    updatedAt: serverTimestamp(),
-    ...additionalData,
-  });
-
-  // Clear active change order on parent order when signed or cancelled
-  if (status === 'signed' || status === 'cancelled') {
-    const changeOrder = await getChangeOrder(changeOrderId);
-    if (changeOrder) {
-      const orderRef = doc(db, ORDERS_COLLECTION, changeOrder.orderId);
-      await updateDoc(orderRef, {
-        activeChangeOrderId: null,
-        activeChangeOrderStatus: null,
-        updatedAt: serverTimestamp(),
-      });
-    }
-  }
-}
-
-// Apply change order to parent order (updates the order's pricing, customer, building to match change order)
-export async function applyChangeOrderToOrder(
-  changeOrderId: string
-): Promise<void> {
-  const changeOrder = await getChangeOrder(changeOrderId);
-  if (!changeOrder) {
-    throw new Error('Change order not found');
-  }
-
-  const orderRef = doc(db, ORDERS_COLLECTION, changeOrder.orderId);
-  const orderSnap = await getDoc(orderRef);
-
-  if (!orderSnap.exists()) {
-    throw new Error('Parent order not found');
-  }
-
-  // Build update object
-  const updates: Record<string, unknown> = {
-    // Update pricing
-    pricing: {
-      subtotalBeforeTax: changeOrder.newValues.subtotalBeforeTax,
-      extraMoneyFluff: changeOrder.newValues.extraMoneyFluff,
-      deposit: changeOrder.newValues.deposit,
-    },
-    // Track total deposit difference from original
-    totalDepositDifference: changeOrder.cumulativeFromOriginal.depositDiff,
-    updatedAt: serverTimestamp(),
   };
 
-  // Apply customer changes if present
-  if (changeOrder.newCustomer) {
-    updates.customer = changeOrder.newCustomer;
+  // Restore pricing if it was changed by sendChangeOrderForSignature
+  if (changeOrder.status === 'pending_signature' && changeOrder.previousValues) {
+    orderUpdate.pricing = {
+      subtotalBeforeTax: changeOrder.previousValues.subtotalBeforeTax,
+      extraMoneyFluff: changeOrder.previousValues.extraMoneyFluff,
+      deposit: changeOrder.previousValues.deposit,
+    };
+    // Restore customer/building if they were changed
+    if (changeOrder.previousCustomer) {
+      orderUpdate.customer = changeOrder.previousCustomer;
+    }
+    if (changeOrder.previousBuilding) {
+      orderUpdate.building = changeOrder.previousBuilding;
+    }
+    // Restore status to what it was before the CO reset it to draft
+    // If order was ready_for_manufacturer or signed before CO, restore that
+    if (orderData?.status === 'draft' || orderData?.status === 'sent_for_signature') {
+      // The CO flow resets to draft then sends — if cancelled, go back to previous state
+      // We can't always know the exact previous status, but signed orders should go back to signed
+      if (orderData?.signedAt) {
+        const isPaid = orderData?.payment?.status === 'paid' || orderData?.payment?.status === 'manually_approved';
+        orderUpdate.status = isPaid ? 'ready_for_manufacturer' : 'signed';
+      }
+    }
   }
 
-  // Apply building changes if present
-  if (changeOrder.newBuilding) {
-    updates.building = changeOrder.newBuilding;
-  }
+  await updateDoc(orderRef, orderUpdate);
 
-  await updateDoc(orderRef, updates);
+  // Recalculate ledger summary to reflect restored pricing
+  try {
+    const { recalculateLedgerSummary } = await import('./paymentService');
+    await recalculateLedgerSummary(changeOrder.orderId);
+  } catch (err) {
+    console.warn('Failed to recalculate ledger summary after CO cancellation:', err);
+  }
 }
 
 // Delete a change order (only if draft and no signature sent)
@@ -588,38 +579,3 @@ export async function deleteChangeOrder(changeOrderId: string): Promise<void> {
   }
 }
 
-// Get summary of all deposit differences for an order
-export async function getOrderDepositSummary(orderId: string): Promise<{
-  originalDeposit: number;
-  currentDeposit: number;
-  totalDifference: number;
-  changeOrders: Array<{
-    changeOrderNumber: string;
-    status: ChangeOrderStatus;
-    depositDiff: number;
-  }>;
-}> {
-  const orderRef = doc(db, ORDERS_COLLECTION, orderId);
-  const orderSnap = await getDoc(orderRef);
-
-  if (!orderSnap.exists()) {
-    throw new Error('Order not found');
-  }
-
-  const order = orderSnap.data() as Order;
-  const changeOrders = await getChangeOrdersForOrder(orderId);
-
-  const originalDeposit = order.originalPricing?.deposit || order.pricing.deposit;
-  const currentDeposit = order.pricing.deposit;
-
-  return {
-    originalDeposit,
-    currentDeposit,
-    totalDifference: currentDeposit - originalDeposit,
-    changeOrders: changeOrders.map((co) => ({
-      changeOrderNumber: co.changeOrderNumber,
-      status: co.status,
-      depositDiff: co.differences.depositDiff,
-    })),
-  };
-}

@@ -175,17 +175,21 @@ export function ChangeOrderPage({
     try {
       const options = await getAllAdminOptions();
       setAdminOptions(options);
+    } catch (err) {
+      console.error('Failed to load admin options:', err);
+    } finally {
+      setOptionsLoading(false);
+    }
 
-      // Override manufacturers from manufacturer_config (single source of truth)
+    // Override manufacturers from manufacturer_config (single source of truth)
+    try {
       const configs = await getActiveManufacturerConfigs();
       const manufacturerNames = configs.map(c => c.name).sort();
       if (manufacturerNames.length > 0) {
         setAdminOptions(prev => ({ ...prev, manufacturers: manufacturerNames }));
       }
     } catch (err) {
-      console.error('Failed to load admin options:', err);
-    } finally {
-      setOptionsLoading(false);
+      console.error('Failed to load manufacturer configs, falling back to admin options:', err);
     }
   };
 
