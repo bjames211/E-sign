@@ -315,7 +315,7 @@ export const BALANCE_STATUS_COLORS: Record<BalanceStatus, { bg: string; color: s
  * Helper to determine balance status from ledger summary
  */
 export const getBalanceStatus = (summary: OrderLedgerSummary): BalanceStatus => {
-  if (summary.pendingReceived > 0 && summary.netReceived === 0) {
+  if (summary.pendingReceived > 0 || summary.pendingRefunds > 0) {
     return 'pending';
   }
   if (summary.balance === 0) {

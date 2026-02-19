@@ -14,7 +14,6 @@ import { ChangeOrderForm } from './ChangeOrderForm';
 import { ChangeOrderCard } from './ChangeOrderCard';
 import { OrderInteractionHistory } from './OrderInteractionHistory';
 import { PaymentSection } from '../payments/PaymentSection';
-import { TransactionsLedger } from '../payments/TransactionsLedger';
 import { getOrderAuditLog } from '../../services/orderService';
 
 interface ValidationResponse {
@@ -1114,20 +1113,6 @@ export function OrderDetails({
               </div>
             )}
           </div>
-
-          {/* ═══════════════════════════════════════════════════════════ */}
-          {/* TRANSACTIONS LEDGER */}
-          {/* ═══════════════════════════════════════════════════════════ */}
-          {order.ledgerSummary && (
-            <div style={styles.majorSection}>
-              <h3 style={styles.majorSectionTitle}>TRANSACTIONS LEDGER</h3>
-              <TransactionsLedger
-                order={order}
-                ledgerSummary={order.ledgerSummary}
-                effectiveDepositRequired={pendingSignatureChangeOrder?.newValues?.deposit}
-              />
-            </div>
-          )}
 
           {/* ═══════════════════════════════════════════════════════════ */}
           {/* PAYMENT */}

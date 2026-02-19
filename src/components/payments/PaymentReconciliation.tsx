@@ -117,12 +117,14 @@ export function PaymentReconciliation({
 
       {error && <div style={styles.error}>{error}</div>}
 
-      {/* Deposit Requirement */}
-      <DepositRequirementCard
-        originalDeposit={originalDeposit}
-        currentDeposit={currentDeposit}
-        depositAdjustments={grouped.depositAdjustments}
-      />
+      {/* Deposit Requirement - only show when there are adjustments */}
+      {grouped.depositAdjustments.length > 0 && (
+        <DepositRequirementCard
+          originalDeposit={originalDeposit}
+          currentDeposit={currentDeposit}
+          depositAdjustments={grouped.depositAdjustments}
+        />
+      )}
 
       {/* Money Received */}
       <MoneyReceivedSection
@@ -134,15 +136,17 @@ export function PaymentReconciliation({
         approvingId={approvingId}
       />
 
-      {/* Refunds Issued */}
-      <RefundsSection
-        refunds={grouped.refunds}
-        totalRefunded={totals.totalRefunded}
-        pendingAmount={totals.pendingRefunds}
-        onViewProof={handleViewProof}
-        onApprove={handleApproveClick}
-        approvingId={approvingId}
-      />
+      {/* Refunds Issued - only show when there are refunds */}
+      {grouped.refunds.length > 0 && (
+        <RefundsSection
+          refunds={grouped.refunds}
+          totalRefunded={totals.totalRefunded}
+          pendingAmount={totals.pendingRefunds}
+          onViewProof={handleViewProof}
+          onApprove={handleApproveClick}
+          approvingId={approvingId}
+        />
+      )}
 
       {/* Balance Reconciliation */}
       <BalanceCard
