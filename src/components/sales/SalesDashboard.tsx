@@ -955,74 +955,94 @@ export function SalesDashboard({ onNavigateToChangeOrder }: SalesDashboardProps)
                               </div>
                             )}
                           </td>
-                          <td style={{ ...styles.td, textAlign: 'center' }}>
-                            {getStatusBadge(order.paymentStatus, 'payment')}
-                          </td>
-                          <td style={{ ...styles.td, textAlign: 'center' }}>
-                            {getStatusBadge(
-                              order.sentForSignatureAt ? 'sent' : 'none',
-                              'signature'
-                            )}
-                          </td>
-                          <td style={{ ...styles.td, textAlign: 'center' }}>
-                            {getStatusBadge(order.signatureStatus, 'signature')}
-                          </td>
-                          <td style={{ ...styles.td, textAlign: 'center' }}>
-                            {getStatusBadge(order.sentToMfgStatus, 'mfg')}
-                          </td>
-                          <td style={{ ...styles.td, textAlign: 'center' }}>
-                            {getStatusBadge(String(order.okToPay), 'oktopay')}
-                          </td>
-                          <td style={{ ...styles.td, textAlign: 'center' }}>
-                            <div style={styles.actionButtons}>
-                              {/* Change Order button - show for eligible orders */}
-                              {order.status !== 'ready_for_manufacturer' && order.status !== 'cancelled' && onNavigateToChangeOrder && (
-                                <button
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    onNavigateToChangeOrder(order.id);
-                                  }}
-                                  style={{
-                                    ...styles.actionButton,
-                                    backgroundColor: '#f3e5f5',
-                                    color: '#7b1fa2',
-                                  }}
-                                  title="Create change order"
-                                >
-                                  +CO
-                                </button>
+                          {order.status === 'cancelled' ? (
+                            <td colSpan={6} style={{ ...styles.td, textAlign: 'center' }}>
+                              <span style={{
+                                fontSize: '14px',
+                                fontWeight: 600,
+                                color: '#c62828',
+                                letterSpacing: '0.5px',
+                              }}>
+                                CANCELLED
+                              </span>
+                              {order.cancelReason && (
+                                <span style={{ fontSize: '12px', color: '#999', marginLeft: 8 }}>
+                                  — {order.cancelReason}
+                                </span>
                               )}
-                              {/* Resend/Remind for orders awaiting signature */}
-                              {order.status !== 'cancelled' && order.signatureStatus === 'sent' && (
-                                <>
-                                  <button
-                                    onClick={(e) => handleResendSignature(e, order.id, order.orderNumber)}
-                                    disabled={actionInProgress === order.id}
-                                    style={{
-                                      ...styles.actionButton,
-                                      backgroundColor: '#e3f2fd',
-                                      color: '#1565c0',
-                                    }}
-                                    title="Resend signature request"
-                                  >
-                                    {actionInProgress === order.id ? '...' : 'Resend'}
-                                  </button>
-                                  <button
-                                    onClick={(e) => handleSendReminder(e, order.id, order.orderNumber)}
-                                    disabled={actionInProgress === order.id}
-                                    style={{
-                                      ...styles.actionButton,
-                                      backgroundColor: '#fff3e0',
-                                      color: '#e65100',
-                                    }}
-                                    title="Send reminder email"
-                                  >
-                                    {actionInProgress === order.id ? '...' : 'Remind'}
-                                  </button>
-                                </>
-                              )}
-                            </div>
-                          </td>
+                            </td>
+                          ) : (
+                            <>
+                              <td style={{ ...styles.td, textAlign: 'center' }}>
+                                {getStatusBadge(order.paymentStatus, 'payment')}
+                              </td>
+                              <td style={{ ...styles.td, textAlign: 'center' }}>
+                                {getStatusBadge(
+                                  order.sentForSignatureAt ? 'sent' : 'none',
+                                  'signature'
+                                )}
+                              </td>
+                              <td style={{ ...styles.td, textAlign: 'center' }}>
+                                {getStatusBadge(order.signatureStatus, 'signature')}
+                              </td>
+                              <td style={{ ...styles.td, textAlign: 'center' }}>
+                                {getStatusBadge(order.sentToMfgStatus, 'mfg')}
+                              </td>
+                              <td style={{ ...styles.td, textAlign: 'center' }}>
+                                {getStatusBadge(String(order.okToPay), 'oktopay')}
+                              </td>
+                              <td style={{ ...styles.td, textAlign: 'center' }}>
+                                <div style={styles.actionButtons}>
+                                  {/* Change Order button - show for eligible orders */}
+                                  {order.status !== 'ready_for_manufacturer' && onNavigateToChangeOrder && (
+                                    <button
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        onNavigateToChangeOrder(order.id);
+                                      }}
+                                      style={{
+                                        ...styles.actionButton,
+                                        backgroundColor: '#f3e5f5',
+                                        color: '#7b1fa2',
+                                      }}
+                                      title="Create change order"
+                                    >
+                                      +CO
+                                    </button>
+                                  )}
+                                  {/* Resend/Remind for orders awaiting signature */}
+                                  {order.signatureStatus === 'sent' && (
+                                    <>
+                                      <button
+                                        onClick={(e) => handleResendSignature(e, order.id, order.orderNumber)}
+                                        disabled={actionInProgress === order.id}
+                                        style={{
+                                          ...styles.actionButton,
+                                          backgroundColor: '#e3f2fd',
+                                          color: '#1565c0',
+                                        }}
+                                        title="Resend signature request"
+                                      >
+                                        {actionInProgress === order.id ? '...' : 'Resend'}
+                                      </button>
+                                      <button
+                                        onClick={(e) => handleSendReminder(e, order.id, order.orderNumber)}
+                                        disabled={actionInProgress === order.id}
+                                        style={{
+                                          ...styles.actionButton,
+                                          backgroundColor: '#fff3e0',
+                                          color: '#e65100',
+                                        }}
+                                        title="Send reminder email"
+                                      >
+                                        {actionInProgress === order.id ? '...' : 'Remind'}
+                                      </button>
+                                    </>
+                                  )}
+                                </div>
+                              </td>
+                            </>
+                          )}
                         </tr>
                       );
                     })}

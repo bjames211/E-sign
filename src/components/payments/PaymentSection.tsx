@@ -20,9 +20,10 @@ import { PaymentReconciliation } from './PaymentReconciliation';
 interface PaymentSectionProps {
   order: Order;
   onRefresh?: () => void;
+  readOnly?: boolean;
 }
 
-export function PaymentSection({ order, onRefresh }: PaymentSectionProps) {
+export function PaymentSection({ order, onRefresh, readOnly = false }: PaymentSectionProps) {
   const [payments, setPayments] = useState<PaymentRecord[]>([]);
   const [ledgerEntries, setLedgerEntries] = useState<PaymentLedgerEntry[]>([]);
   const [summary, setSummary] = useState<PaymentSummary | null>(null);
@@ -386,12 +387,14 @@ export function PaymentSection({ order, onRefresh }: PaymentSectionProps) {
       {/* Payment History Header */}
       <div style={styles.historyHeader}>
         <h4 style={styles.historyTitle}>PAYMENT HISTORY</h4>
-        <button
-          onClick={() => setShowAddModal(true)}
-          style={styles.addButton}
-        >
-          + Add Payment
-        </button>
+        {!readOnly && (
+          <button
+            onClick={() => setShowAddModal(true)}
+            style={styles.addButton}
+          >
+            + Add Payment
+          </button>
+        )}
       </div>
 
       {/* Payment History Table */}

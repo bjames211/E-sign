@@ -565,7 +565,7 @@ export function OrderDetails({
   };
 
   // Check if we can create change orders (not ready for manufacturer)
-  const canCreateChangeOrder = order.status !== 'ready_for_manufacturer';
+  const canCreateChangeOrder = order.status !== 'ready_for_manufacturer' && order.status !== 'cancelled';
 
   // Get active draft change order (only drafts block new creation)
   // pending_signature change orders don't block - user can create new CO which will cancel the pending one
@@ -1206,7 +1206,7 @@ export function OrderDetails({
           {/* ═══════════════════════════════════════════════════════════ */}
           <div style={styles.majorSection}>
             <h3 style={styles.majorSectionTitle}>PAYMENT</h3>
-            <PaymentSection order={order} onRefresh={onRefresh} />
+            <PaymentSection order={order} onRefresh={onRefresh} readOnly={order.status === 'cancelled'} />
           </div>
 
           {/* ═══════════════════════════════════════════════════════════ */}
