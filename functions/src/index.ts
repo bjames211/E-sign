@@ -500,13 +500,13 @@ export const cancelOrder = functions.https.onRequest(async (req, res) => {
     const orderData = orderDoc.data()!;
     const currentStatus = orderData.status;
 
-    // Only allow cancellation for draft and sent_for_signature
+    // Only allow cancellation for draft, pending_payment, and sent_for_signature
     if (currentStatus === 'cancelled') {
       res.status(400).json({ error: 'Order is already cancelled.' });
       return;
     }
-    if (currentStatus !== 'draft' && currentStatus !== 'sent_for_signature') {
-      res.status(400).json({ error: `Cannot cancel order in "${currentStatus}" status. Only draft and awaiting-signature orders can be cancelled.` });
+    if (currentStatus !== 'draft' && currentStatus !== 'pending_payment' && currentStatus !== 'sent_for_signature') {
+      res.status(400).json({ error: `Cannot cancel order in "${currentStatus}" status. Only draft, pending payment, and awaiting-signature orders can be cancelled.` });
       return;
     }
 

@@ -602,7 +602,7 @@ export function OrderDetails({
             )}
             {/* Prominent Cancel Order button in header */}
             {onCancelOrder &&
-             (order.status === 'draft' || order.status === 'sent_for_signature') && (
+             (order.status === 'draft' || order.status === 'pending_payment' || order.status === 'sent_for_signature') && (
               <button
                 onClick={() => setShowCancelOrderModal(true)}
                 style={styles.cancelOrderHeaderButton}
@@ -1549,7 +1549,7 @@ export function OrderDetails({
           )}
           {/* Cancel Order button - show for draft and sent_for_signature orders */}
           {onCancelOrder &&
-           (order.status === 'draft' || order.status === 'sent_for_signature') && (
+           (order.status === 'draft' || order.status === 'pending_payment' || order.status === 'sent_for_signature') && (
             <button
               onClick={() => setShowCancelOrderModal(true)}
               style={styles.cancelOrderButton}
