@@ -906,18 +906,23 @@ export function SalesDashboard({ onNavigateToChangeOrder }: SalesDashboardProps)
                           onClick={() => handleOrderClick(order)}
                           style={{
                             ...styles.tableRow,
-                            backgroundColor: order.okToPay ? '#f1f8e9' :
+                            backgroundColor: order.status === 'cancelled' ? '#ffebee' :
+                                           order.okToPay ? '#f1f8e9' :
                                            order.hasLiveCO ? '#e3f2fd' :
                                            order.hasChangeOrders ? '#fff8e1' : 'transparent',
+                            opacity: order.status === 'cancelled' ? 0.7 : 1,
                             cursor: 'pointer',
                           }}
                         >
                           <td style={{ ...styles.td, fontFamily: 'monospace' }}>
-                            <span style={{ color: '#1565c0' }}>{order.orderNumber}</span>
-                            {order.hasLiveCO && (
+                            <span style={{ color: order.status === 'cancelled' ? '#c62828' : '#1565c0' }}>{order.orderNumber}</span>
+                            {order.status === 'cancelled' && (
+                              <span style={styles.cancelledBadge}>Cancelled</span>
+                            )}
+                            {order.status !== 'cancelled' && order.hasLiveCO && (
                               <span style={styles.liveCOBadge}>{order.liveCONumber}</span>
                             )}
-                            {!order.hasLiveCO && order.hasChangeOrders && (
+                            {order.status !== 'cancelled' && !order.hasLiveCO && order.hasChangeOrders && (
                               <span style={styles.coBadge}>+{order.changeOrderCount} CO</span>
                             )}
                           </td>
@@ -971,7 +976,7 @@ export function SalesDashboard({ onNavigateToChangeOrder }: SalesDashboardProps)
                           <td style={{ ...styles.td, textAlign: 'center' }}>
                             <div style={styles.actionButtons}>
                               {/* Change Order button - show for eligible orders */}
-                              {order.status !== 'ready_for_manufacturer' && onNavigateToChangeOrder && (
+                              {order.status !== 'ready_for_manufacturer' && order.status !== 'cancelled' && onNavigateToChangeOrder && (
                                 <button
                                   onClick={(e) => {
                                     e.stopPropagation();
@@ -988,7 +993,7 @@ export function SalesDashboard({ onNavigateToChangeOrder }: SalesDashboardProps)
                                 </button>
                               )}
                               {/* Resend/Remind for orders awaiting signature */}
-                              {order.signatureStatus === 'sent' && (
+                              {order.status !== 'cancelled' && order.signatureStatus === 'sent' && (
                                 <>
                                   <button
                                     onClick={(e) => handleResendSignature(e, order.id, order.orderNumber)}
@@ -1331,6 +1336,16 @@ const styles: Record<string, React.CSSProperties> = {
     fontWeight: 600,
     backgroundColor: '#e3f2fd',
     color: '#1565c0',
+    borderRadius: '4px',
+  },
+  cancelledBadge: {
+    display: 'inline-block',
+    marginLeft: '6px',
+    padding: '1px 6px',
+    fontSize: '10px',
+    fontWeight: 600,
+    backgroundColor: '#ffcdd2',
+    color: '#c62828',
     borderRadius: '4px',
   },
   emptyState: {

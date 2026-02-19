@@ -600,6 +600,16 @@ export function OrderDetails({
                 ⚠️ TEST MODE
               </span>
             )}
+            {/* Prominent Cancel Order button in header */}
+            {onCancelOrder &&
+             (order.status === 'draft' || order.status === 'sent_for_signature') && (
+              <button
+                onClick={() => setShowCancelOrderModal(true)}
+                style={styles.cancelOrderHeaderButton}
+              >
+                Cancel Order
+              </button>
+            )}
           </div>
           <button onClick={onClose} style={styles.closeButton}>
             ×
@@ -2563,6 +2573,17 @@ const styles: Record<string, React.CSSProperties> = {
     border: '1px solid #c62828',
     borderRadius: '4px',
     fontSize: '14px',
+    cursor: 'pointer',
+    fontWeight: 500,
+  },
+  cancelOrderHeaderButton: {
+    marginLeft: '12px',
+    padding: '4px 12px',
+    backgroundColor: '#ffebee',
+    color: '#c62828',
+    border: '1px solid #ef9a9a',
+    borderRadius: '4px',
+    fontSize: '12px',
     cursor: 'pointer',
     fontWeight: 500,
   },
