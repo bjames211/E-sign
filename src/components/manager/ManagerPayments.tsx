@@ -137,6 +137,12 @@ export function ManagerPayments() {
   } | null>(null);
   const [approvalCode, setApprovalCode] = useState('');
   const [approvingPayment, setApprovingPayment] = useState(false);
+  const [approvalForm, setApprovalForm] = useState({
+    method: '',
+    notes: '',
+  });
+  const [approvalProofFile, setApprovalProofFile] = useState<File | null>(null);
+  const [approvalProofPreview, setApprovalProofPreview] = useState<string | null>(null);
 
   // Load dashboard data on mount
   useEffect(() => {
@@ -499,6 +505,9 @@ export function ManagerPayments() {
       isLegacy: false,
     });
     setApprovalCode('');
+    setApprovalForm({ method: entry.method || '', notes: '' });
+    setApprovalProofFile(null);
+    setApprovalProofPreview(null);
   };
 
   // Open approval modal for a legacy order payment
@@ -511,6 +520,9 @@ export function ManagerPayments() {
       isLegacy: true,
     });
     setApprovalCode('');
+    setApprovalForm({ method: method || '', notes: '' });
+    setApprovalProofFile(null);
+    setApprovalProofPreview(null);
   };
 
   // Handle payment approval
@@ -518,11 +530,26 @@ export function ManagerPayments() {
     if (!approvalModal) return;
     if (!isManager && !approvalCode) return;
 
+    // Require proof for check/wire
+    if ((approvalForm.method === 'check' || approvalForm.method === 'wire') && !approvalProofFile && !approvalModal.entry?.proofFile) {
+      alert('Proof of payment is required for check/wire payments');
+      return;
+    }
+
     setApprovingPayment(true);
     setError(null);
 
     try {
       const functionsUrl = import.meta.env.VITE_FUNCTIONS_URL || 'https://us-central1-e-sign-27f9a.cloudfunctions.net';
+
+      // Upload proof file if provided
+      let proofFileUrl: string | undefined;
+      if (approvalProofFile) {
+        const orderId = approvalModal.orderId || approvalModal.entry?.orderId;
+        const storageRef = ref(storage, `payment-proofs/${orderId}/${Date.now()}_${approvalProofFile.name}`);
+        await uploadBytes(storageRef, approvalProofFile);
+        proofFileUrl = await getDownloadURL(storageRef);
+      }
 
       let response;
       if (approvalModal.isLegacy) {
@@ -538,7 +565,9 @@ export function ManagerPayments() {
             approvedByEmail: user?.email,
             approvedByRole: userRole,
             amount: approvalModal.amount,
-            method: approvalModal.method,
+            method: approvalForm.method || approvalModal.method,
+            proofFile: proofFileUrl,
+            notes: approvalForm.notes || undefined,
           }),
         });
       } else if (approvalModal.entry) {
@@ -552,6 +581,9 @@ export function ManagerPayments() {
             approvedBy: user?.email || 'Manager',
             approvedByEmail: user?.email,
             approvedByRole: userRole,
+            method: approvalForm.method || undefined,
+            proofFile: proofFileUrl,
+            notes: approvalForm.notes || undefined,
           }),
         });
       } else {
@@ -567,6 +599,9 @@ export function ManagerPayments() {
       // Close modal and refresh
       setApprovalModal(null);
       setApprovalCode('');
+      setApprovalForm({ method: '', notes: '' });
+      setApprovalProofFile(null);
+      setApprovalProofPreview(null);
       await loadDashboardData();
       alert('Payment approved successfully');
     } catch (err: any) {
@@ -2211,49 +2246,151 @@ export function ManagerPayments() {
       )}
 
       {/* Approval Modal */}
-      {approvalModal && (
+      {approvalModal && (() => {
+        const balance = approvalModal.entry?.orderBalance ?? (approvalModal.amount || 0);
+        const isRefund = balance < 0;
+        const actionLabel = isRefund ? 'Refund' : 'Collect';
+        const actionColor = isRefund ? '#1565c0' : '#4caf50';
+        return (
         <div style={styles.modalOverlay}>
-          <div style={{ ...styles.modal, maxWidth: '400px' }}>
-            <h3 style={styles.modalTitle}>
-              Approve Payment - {approvalModal.orderNumber}
-            </h3>
-            <div style={styles.modalContent}>
-              <div style={{ marginBottom: '16px' }}>
-                <p style={{ margin: '0 0 8px 0', color: '#666' }}>
-                  Approve {approvalModal.method?.replace(/_/g, ' ')} payment of{' '}
-                  <strong>{formatCurrency(approvalModal.amount || 0)}</strong>?
+          <div style={{ ...styles.modal, maxWidth: '500px' }}>
+            <div style={styles.modalHeader}>
+              <h3 style={styles.modalTitle}>
+                {actionLabel} Payment - {approvalModal.orderNumber}
+              </h3>
+              <button onClick={() => {
+                setApprovalModal(null);
+                setApprovalCode('');
+                setApprovalForm({ method: '', notes: '' });
+                setApprovalProofFile(null);
+                setApprovalProofPreview(null);
+              }} style={styles.modalClose}>×</button>
+            </div>
+            <div style={styles.modalBody}>
+              <div style={{ marginBottom: '16px', padding: '12px', backgroundColor: '#f5f5f5', borderRadius: '8px' }}>
+                <p style={{ margin: '0 0 4px 0', color: '#666', fontSize: '13px' }}>Amount</p>
+                <p style={{ margin: '0', fontSize: '20px', fontWeight: 600, color: '#333' }}>
+                  {formatCurrency(approvalModal.amount || 0)}
                 </p>
                 {approvalModal.entry && (
-                  <p style={{ margin: '0', fontSize: '13px', color: '#999' }}>
-                    Entry ID: {approvalModal.entry.paymentNumber || approvalModal.entry.id}
+                  <p style={{ margin: '4px 0 0 0', fontSize: '12px', color: '#999' }}>
+                    Entry: {approvalModal.entry.paymentNumber || approvalModal.entry.id}
                   </p>
                 )}
               </div>
-              {isManager ? (
+
+              <div style={styles.formGroup}>
+                <label style={styles.formLabel}>Payment Method</label>
+                <select
+                  value={approvalForm.method}
+                  onChange={(e) => setApprovalForm({ ...approvalForm, method: e.target.value })}
+                  style={styles.formSelect}
+                >
+                  <option value="">-- Select method --</option>
+                  <option value="stripe">Stripe</option>
+                  <option value="check">Check</option>
+                  <option value="cash">Cash</option>
+                  <option value="wire">Wire Transfer</option>
+                  <option value="credit_on_file">Credit on File</option>
+                  <option value="other">Other</option>
+                </select>
+              </div>
+
+              {/* Proof Upload - Required for check/wire */}
+              {(approvalForm.method === 'check' || approvalForm.method === 'wire') && (
                 <div style={styles.formGroup}>
-                  <span style={{ fontSize: '13px', color: '#2e7d32' }}>
-                    Approving as {user?.email}
-                  </span>
+                  <label style={styles.formLabel}>
+                    {approvalForm.method === 'check' ? 'Check Photo' : 'Wire Transfer Proof'}
+                    <span style={{ color: '#c62828', marginLeft: '4px' }}>*</span>
+                  </label>
+                  <input
+                    type="file"
+                    accept="image/*,.pdf"
+                    onChange={(e) => {
+                      const file = e.target.files?.[0];
+                      if (file) {
+                        setApprovalProofFile(file);
+                        if (file.type.startsWith('image/')) {
+                          const reader = new FileReader();
+                          reader.onloadend = () => {
+                            setApprovalProofPreview(reader.result as string);
+                          };
+                          reader.readAsDataURL(file);
+                        } else {
+                          setApprovalProofPreview(null);
+                        }
+                      }
+                    }}
+                    style={{ display: 'none' }}
+                    id="approval-proof-file-input"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => document.getElementById('approval-proof-file-input')?.click()}
+                    style={{
+                      ...styles.cancelBtn,
+                      backgroundColor: '#1565c0',
+                      color: 'white',
+                      border: 'none',
+                    }}
+                  >
+                    {approvalProofFile ? 'Change File' : 'Select File'}
+                  </button>
+                  {approvalProofFile && (
+                    <div style={{ marginTop: '8px', fontSize: '13px', color: '#333' }}>
+                      <span>{approvalProofFile.name}</span>
+                      <span style={{ color: '#666', marginLeft: '8px' }}>
+                        ({(approvalProofFile.size / 1024).toFixed(1)} KB)
+                      </span>
+                    </div>
+                  )}
+                  {approvalProofPreview && (
+                    <div style={{ marginTop: '8px' }}>
+                      <img
+                        src={approvalProofPreview}
+                        alt="Proof preview"
+                        style={{ maxWidth: '150px', borderRadius: '4px', border: '1px solid #ddd' }}
+                      />
+                    </div>
+                  )}
+                </div>
+              )}
+
+              <div style={styles.formGroup}>
+                <label style={styles.formLabel}>Notes {approvalForm.method === 'other' && <span style={{ color: '#c62828' }}>*</span>}</label>
+                <textarea
+                  value={approvalForm.notes}
+                  onChange={(e) => setApprovalForm({ ...approvalForm, notes: e.target.value })}
+                  style={{ ...styles.formInput, minHeight: '60px', resize: 'vertical' }}
+                  placeholder={isRefund ? 'Describe how the refund was processed' : 'Payment collection details'}
+                />
+              </div>
+
+              {isManager ? (
+                <div style={{ fontSize: '13px', color: '#2e7d32', marginTop: '8px' }}>
+                  Approving as {user?.email}
                 </div>
               ) : (
                 <div style={styles.formGroup}>
-                  <label style={styles.label}>Manager Approval Code</label>
+                  <label style={styles.formLabel}>Manager Approval Code</label>
                   <input
                     type="password"
                     value={approvalCode}
                     onChange={(e) => setApprovalCode(e.target.value)}
                     placeholder="Enter approval code"
-                    style={styles.input}
-                    autoFocus
+                    style={styles.formInput}
                   />
                 </div>
               )}
             </div>
-            <div style={styles.modalActions}>
+            <div style={styles.modalFooter}>
               <button
                 onClick={() => {
                   setApprovalModal(null);
                   setApprovalCode('');
+                  setApprovalForm({ method: '', notes: '' });
+                  setApprovalProofFile(null);
+                  setApprovalProofPreview(null);
                 }}
                 style={styles.cancelBtn}
               >
@@ -2261,19 +2398,20 @@ export function ManagerPayments() {
               </button>
               <button
                 onClick={handleApprovePayment}
-                disabled={approvingPayment || (!isManager && !approvalCode)}
+                disabled={approvingPayment || (!isManager && !approvalCode) || !approvalForm.method || (approvalForm.method === 'other' && !approvalForm.notes)}
                 style={{
                   ...styles.submitBtn,
-                  backgroundColor: '#4caf50',
-                  opacity: approvingPayment || (!isManager && !approvalCode) ? 0.6 : 1,
+                  backgroundColor: actionColor,
+                  opacity: approvingPayment || (!isManager && !approvalCode) || !approvalForm.method ? 0.6 : 1,
                 }}
               >
-                {approvingPayment ? 'Approving...' : 'Approve'}
+                {approvingPayment ? 'Processing...' : actionLabel}
               </button>
             </div>
           </div>
         </div>
-      )}
+        );
+      })()}
     </div>
   );
 }

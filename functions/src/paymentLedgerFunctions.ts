@@ -727,7 +727,7 @@ export const approveLedgerEntry = functions.https.onRequest(async (req, res) => 
 
   try {
     const db = admin.firestore();
-    const { entryId, approvalCode, approvedBy, approvedByEmail, approvedByRole, stripePaymentId, proofFile } = req.body;
+    const { entryId, approvalCode, approvedBy, approvedByEmail, approvedByRole, stripePaymentId, proofFile, method, notes } = req.body;
 
     if (!entryId) {
       res.status(400).json({ error: 'entryId is required' });
@@ -818,6 +818,16 @@ export const approveLedgerEntry = functions.https.onRequest(async (req, res) => 
     // Add proof file if provided
     if (proofFile) {
       updateData.proofFile = proofFile;
+    }
+
+    // Update method if provided (manager may correct during approval)
+    if (method) {
+      updateData.method = method;
+    }
+
+    // Add notes if provided
+    if (notes) {
+      updateData.notes = notes;
     }
 
     await entryRef.update(updateData);
