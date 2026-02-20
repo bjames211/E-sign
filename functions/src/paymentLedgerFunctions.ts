@@ -547,9 +547,9 @@ export const addLedgerEntry = functions.https.onRequest(async (req, res) => {
 
       // Check manager/admin role
       if (data.approvedByEmail && (data.approvedByRole === 'manager' || data.approvedByRole === 'admin')) {
-        const roleSnap = await db.collection('user_roles').where('email', '==', data.approvedByEmail).limit(1).get();
-        if (!roleSnap.empty) {
-          const roleData = roleSnap.docs[0].data();
+        const roleDoc = await db.collection('user_roles').doc(data.approvedByEmail).get();
+        if (roleDoc.exists) {
+          const roleData = roleDoc.data()!;
           if (roleData.role === 'manager' || roleData.role === 'admin') {
             autoApproved = true;
             approvedBy = data.approvedByEmail;
@@ -741,9 +741,9 @@ export const approveLedgerEntry = functions.https.onRequest(async (req, res) => 
 
     if (approvedByEmail && (approvedByRole === 'manager' || approvedByRole === 'admin')) {
       // Verify the role claim against user_roles collection
-      const roleSnap = await db.collection('user_roles').where('email', '==', approvedByEmail).limit(1).get();
-      if (!roleSnap.empty) {
-        const roleData = roleSnap.docs[0].data();
+      const roleDoc = await db.collection('user_roles').doc(approvedByEmail).get();
+      if (roleDoc.exists) {
+        const roleData = roleDoc.data()!;
         if (roleData.role === 'manager' || roleData.role === 'admin') {
           isAuthorized = true;
           resolvedApprovedBy = approvedByEmail;
@@ -905,9 +905,9 @@ export const approveLegacyPayment = functions.https.onRequest(async (req, res) =
     let resolvedApprovedBy = approvedBy || 'Manager';
 
     if (approvedByEmail && (approvedByRole === 'manager' || approvedByRole === 'admin')) {
-      const roleSnap = await db.collection('user_roles').where('email', '==', approvedByEmail).limit(1).get();
-      if (!roleSnap.empty) {
-        const roleData = roleSnap.docs[0].data();
+      const roleDoc = await db.collection('user_roles').doc(approvedByEmail).get();
+      if (roleDoc.exists) {
+        const roleData = roleDoc.data()!;
         if (roleData.role === 'manager' || roleData.role === 'admin') {
           isAuthorized = true;
           resolvedApprovedBy = approvedByEmail;

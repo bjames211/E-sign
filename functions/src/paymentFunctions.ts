@@ -232,9 +232,9 @@ export const approvePaymentRecord = functions.https.onRequest(async (req, res) =
     let resolvedApprovedBy = approvedBy || 'Manager';
 
     if (approvedByEmail && (approvedByRole === 'manager' || approvedByRole === 'admin')) {
-      const roleSnap = await db.collection('user_roles').where('email', '==', approvedByEmail).limit(1).get();
-      if (!roleSnap.empty) {
-        const roleData = roleSnap.docs[0].data();
+      const roleDoc = await db.collection('user_roles').doc(approvedByEmail).get();
+      if (roleDoc.exists) {
+        const roleData = roleDoc.data()!;
         if (roleData.role === 'manager' || roleData.role === 'admin') {
           isAuthorized = true;
           resolvedApprovedBy = approvedByEmail;

@@ -356,8 +356,8 @@ export const sendOrderForSignature = functions.https.onRequest(async (req, res) 
     // Check approval via code or manager role
     let hasPaymentApproval = paymentApprovalCode ? isValidApprovalCode(paymentApprovalCode) : false;
     if (!hasPaymentApproval && approvedByEmail && (approvedByRole === 'manager' || approvedByRole === 'admin')) {
-      const roleSnap = await admin.firestore().collection('user_roles').where('email', '==', approvedByEmail).limit(1).get();
-      if (!roleSnap.empty && ['manager', 'admin'].includes(roleSnap.docs[0].data().role)) {
+      const roleDoc = await admin.firestore().collection('user_roles').doc(approvedByEmail).get();
+      if (roleDoc.exists && ['manager', 'admin'].includes(roleDoc.data()!.role)) {
         hasPaymentApproval = true;
       }
     }
