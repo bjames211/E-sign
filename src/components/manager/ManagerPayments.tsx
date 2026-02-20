@@ -351,7 +351,7 @@ export function ManagerPayments() {
     setError(null);
 
     try {
-      const functionsUrl = import.meta.env.VITE_FUNCTIONS_URL || 'https://us-central1-e-sign-27f9a.cloudfunctions.net';
+      const functionsUrl = import.meta.env.VITE_FUNCTIONS_URL || '';
       const response = await fetch(
         `${functionsUrl}/reconcileLedgerWithStripe`,
         {
@@ -470,7 +470,7 @@ export function ManagerPayments() {
 
   const recalculateSummary = async (orderId: string) => {
     try {
-      const functionsUrl = import.meta.env.VITE_FUNCTIONS_URL || 'https://us-central1-e-sign-27f9a.cloudfunctions.net';
+      const functionsUrl = import.meta.env.VITE_FUNCTIONS_URL || '';
       const response = await fetch(
         `${functionsUrl}/recalculateLedgerSummary`,
         {
@@ -540,7 +540,7 @@ export function ManagerPayments() {
     setError(null);
 
     try {
-      const functionsUrl = import.meta.env.VITE_FUNCTIONS_URL || 'https://us-central1-e-sign-27f9a.cloudfunctions.net';
+      const functionsUrl = import.meta.env.VITE_FUNCTIONS_URL || '';
 
       // Upload proof file if provided
       let proofFileUrl: string | undefined;
@@ -725,7 +725,7 @@ export function ManagerPayments() {
         };
       }
 
-      const functionsUrl = import.meta.env.VITE_FUNCTIONS_URL || 'https://us-central1-e-sign-27f9a.cloudfunctions.net';
+      const functionsUrl = import.meta.env.VITE_FUNCTIONS_URL || '';
       const requestUrl = `${functionsUrl}/addLedgerEntry`;
       const requestBody = {
         orderId: transactionModal.orderId,  // Use orderId to avoid duplicate orderNumber issues

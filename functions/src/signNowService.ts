@@ -157,7 +157,8 @@ async function copyFieldsFromTemplate(
   }
 }
 
-const WEBHOOK_URL = 'https://us-central1-e-sign-27f9a.cloudfunctions.net/signNowWebhook';
+const _projectId = process.env.GCLOUD_PROJECT || process.env.FIREBASE_PROJECT_ID || 'e-sign-27f9a';
+const WEBHOOK_URL = `https://us-central1-${_projectId}.cloudfunctions.net/signNowWebhook`;
 
 /**
  * Register webhook for document completion

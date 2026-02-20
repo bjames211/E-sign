@@ -39,7 +39,7 @@ const statusColors: Record<string, { bg: string; text: string }> = {
   pending_approval: { bg: '#fff3e0', text: '#f57c00' },
 };
 
-const APPROVE_FUNCTION_URL = 'https://us-central1-e-sign-27f9a.cloudfunctions.net/approveAndSend';
+const APPROVE_FUNCTION_URL = `${import.meta.env.VITE_FUNCTIONS_URL || ''}/approveAndSend`;
 
 export function Dashboard() {
   const [documents, setDocuments] = useState<Document[]>([]);

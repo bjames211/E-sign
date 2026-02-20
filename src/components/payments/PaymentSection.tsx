@@ -3,8 +3,6 @@ import { Order } from '../../types/order';
 import {
   PaymentRecord,
   PaymentSummary,
-  PaymentMethod,
-  AddPaymentFormData,
   PaymentLedgerEntry,
   OrderLedgerSummary,
 } from '../../types/payment';
@@ -13,10 +11,7 @@ import {
 } from '../../services/paymentService';
 import { PaymentSummaryCard } from './PaymentSummaryCard';
 import { PaymentHistoryTable } from './PaymentHistoryTable';
-import { AddPaymentModal } from './AddPaymentModal';
-import { ApprovePaymentModal } from './ApprovePaymentModal';
 import { PaymentReconciliation } from './PaymentReconciliation';
-import { useAuth } from '../../contexts/AuthContext';
 
 interface PaymentSectionProps {
   order: Order;
@@ -26,16 +21,12 @@ interface PaymentSectionProps {
 
 export function PaymentSection({ order, onRefresh, readOnly: _readOnly = false }: PaymentSectionProps) {
   void _readOnly;
-  const { user, userRole } = useAuth();
   const [payments, setPayments] = useState<PaymentRecord[]>([]);
   const [ledgerEntries, setLedgerEntries] = useState<PaymentLedgerEntry[]>([]);
   const [summary, setSummary] = useState<PaymentSummary | null>(null);
   const [ledgerSummary, setLedgerSummary] = useState<OrderLedgerSummary | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [showAddModal, setShowAddModal] = useState(false);
-  const [_approving, setApproving] = useState<string | null>(null);
-  const [paymentToApprove, setPaymentToApprove] = useState<PaymentRecord | null>(null);
 
   // Always use ledger system now
   const depositRequired = order.ledgerSummary?.depositRequired || order.pricing?.deposit || 0;
@@ -118,225 +109,11 @@ export function PaymentSection({ order, onRefresh, readOnly: _readOnly = false }
     }
   };
 
-  const handleAddPayment = async (
-    formData: AddPaymentFormData,
-    proofFile?: { name: string; storagePath: string; downloadUrl: string; size: number; type: string }
-  ) => {
-    if (!order.id) {
-      throw new Error('Order ID is required');
-    }
-
-    const amount = parseFloat(formData.amount);
-
-    // Always use ledger endpoint
-    const endpoint = 'addLedgerEntry';
-
-    // Determine transaction type for ledger
-    const transactionType = formData.category === 'refund' ? 'refund' : 'payment';
-
-    const requestBody = {
-      orderId: order.id,
-      orderNumber: order.orderNumber,
-      transactionType,
-      amount,
-      method: formData.method,
-      category: formData.category,
-      stripePaymentId: formData.stripePaymentId || undefined,
-      description: formData.description || `${formData.method} payment`,
-      notes: formData.notes || undefined,
-      proofFile: proofFile || undefined,
-      approvalCode: formData.approvalCode || undefined,
-      approvedByEmail: user?.email,
-      approvedByRole: userRole,
-      createdBy: user?.email || order.createdBy || 'unknown',
-    };
-
-    const response = await fetch(
-      `${import.meta.env.VITE_FUNCTIONS_URL || ''}/${endpoint}`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(requestBody),
-      }
-    );
-
-    const data = await response.json();
-
-    if (!data.success) {
-      throw new Error(data.error || 'Failed to add payment');
-    }
-
-    // Reload payments
-    await loadPayments();
-
-    if (onRefresh) {
-      onRefresh();
-    }
-  };
-
-  // Show approve modal for a payment
-  const handleApprovePayment = (paymentId: string) => {
-    // Check for legacy pending payment
-    if (paymentId === 'legacy-initial-payment-pending') {
-      // Use testPaymentAmount if in test mode, otherwise use deposit amount
-      const legacyPaymentAmount = (order.isTestMode && order.testPaymentAmount !== undefined)
-        ? order.testPaymentAmount
-        : (order.pricing?.deposit || 0);
-      const legacyPaymentRecord: PaymentRecord = {
-        id: 'legacy-initial-payment-pending',
-        orderId: order.id || '',
-        orderNumber: order.orderNumber,
-        amount: legacyPaymentAmount,
-        method: order.payment?.type?.includes('stripe') ? 'stripe' : (order.payment?.type as any) || 'other',
-        category: 'initial_deposit',
-        status: 'pending',
-        description: `Initial deposit (${order.payment?.type?.replace(/_/g, ' ') || 'pending'})`,
-        createdAt: order.createdAt,
-        updatedAt: order.createdAt,
-        createdBy: order.createdBy || 'system',
-      };
-      setPaymentToApprove(legacyPaymentRecord);
-      return;
-    }
-
-    const payment = payments.find(p => p.id === paymentId);
-    if (payment) {
-      setPaymentToApprove(payment);
-    }
-  };
-
-  // Actually approve the payment with method and details
-  const handleConfirmApprove = async (
-    paymentId: string,
-    method: PaymentMethod,
-    approvalCode: string,
-    stripePaymentId?: string,
-    proofFile?: { name: string; storagePath: string; downloadUrl: string; size: number; type: string }
-  ) => {
-    setApproving(paymentId);
-    setError(null);
-
-    try {
-      // Handle legacy pending payment approval
-      if (paymentId === 'legacy-initial-payment-pending') {
-        // Call endpoint to approve the order's legacy payment and create ledger entry
-        const response = await fetch(
-          `${import.meta.env.VITE_FUNCTIONS_URL || ''}/approveLegacyPayment`,
-          {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              orderId: order.id,
-              orderNumber: order.orderNumber,
-              approvalCode: approvalCode || undefined,
-              approvedBy: user?.email || 'Manager',
-              approvedByEmail: user?.email,
-              approvedByRole: userRole,
-              method: method || order.payment?.type,
-              amount: order.pricing?.deposit || 0,
-              proofFile,
-            }),
-          }
-        );
-
-        const data = await response.json();
-
-        if (!data.success) {
-          throw new Error(data.error || 'Failed to approve payment');
-        }
-
-        await loadPayments();
-
-        if (onRefresh) {
-          onRefresh();
-        }
-        return;
-      }
-
-      // Regular payment approval
-      const response = await fetch(
-        `${import.meta.env.VITE_FUNCTIONS_URL || ''}/approvePaymentRecord`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            paymentId,
-            approvalCode: approvalCode || undefined,
-            approvedBy: user?.email || 'Manager',
-            approvedByEmail: user?.email,
-            approvedByRole: userRole,
-            method,
-            stripePaymentId,
-            proofFile,
-          }),
-        }
-      );
-
-      const data = await response.json();
-
-      if (!data.success) {
-        throw new Error(data.error || 'Failed to approve payment');
-      }
-
-      await loadPayments();
-
-      if (onRefresh) {
-        onRefresh();
-      }
-    } catch (err: any) {
-      setError(err.message || 'Failed to approve payment');
-      throw err; // Re-throw so modal can show error
-    } finally {
-      setApproving(null);
-    }
-  };
-
-  const handleRejectPayment = async (paymentId: string) => {
-    const reason = prompt('Enter rejection reason:');
-    if (!reason) return;
-
-    setApproving(paymentId);
-    setError(null);
-
-    try {
-      const response = await fetch(
-        `${import.meta.env.VITE_FUNCTIONS_URL || ''}/rejectPaymentRecord`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            paymentId,
-            rejectedBy: 'Manager',
-            reason,
-          }),
-        }
-      );
-
-      const data = await response.json();
-
-      if (!data.success) {
-        throw new Error(data.error || 'Failed to reject payment');
-      }
-
-      await loadPayments();
-
-      if (onRefresh) {
-        onRefresh();
-      }
-    } catch (err: any) {
-      setError(err.message || 'Failed to reject payment');
-    } finally {
-      setApproving(null);
-    }
-  };
-
   const handleViewProof = (payment: PaymentRecord) => {
     if (payment.proofFile?.downloadUrl) {
       window.open(payment.proofFile.downloadUrl, '_blank');
     }
   };
-
-  const currentBalance = summary?.balance ?? depositRequired;
 
   // Use PaymentReconciliation view for ledger-based orders
   if (order.ledgerSummary) {
@@ -349,31 +126,9 @@ export function PaymentSection({ order, onRefresh, readOnly: _readOnly = false }
           ledgerSummary={order.ledgerSummary}
           ledgerEntries={ledgerEntries}
           loading={loading}
-          onAddPayment={() => setShowAddModal(true)}
+          onAddPayment={() => {}}
           onRefresh={() => { loadPayments(); onRefresh?.(); }}
         />
-
-        {/* Add Payment Modal */}
-        {showAddModal && order.id && (
-          <AddPaymentModal
-            orderId={order.id}
-            orderNumber={order.orderNumber}
-            depositRequired={depositRequired}
-            currentBalance={currentBalance}
-            onSubmit={handleAddPayment}
-            onClose={() => setShowAddModal(false)}
-          />
-        )}
-
-        {/* Approve Payment Modal */}
-        {paymentToApprove && (
-          <ApprovePaymentModal
-            payment={paymentToApprove}
-            orderNumber={order.orderNumber}
-            onApprove={handleConfirmApprove}
-            onClose={() => setPaymentToApprove(null)}
-          />
-        )}
       </div>
     );
   }
@@ -473,8 +228,6 @@ export function PaymentSection({ order, onRefresh, readOnly: _readOnly = false }
           return displayPayments;
         })()}
         loading={loading}
-        onApprove={handleApprovePayment}
-        onReject={handleRejectPayment}
         onViewProof={handleViewProof}
       />
 

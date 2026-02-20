@@ -1004,6 +1004,13 @@ export async function updateOrderOnSigned(esignDocumentId: string): Promise<void
   if (changeOrderId) {
     console.log(`This is a change order signature. Updating change order: ${changeOrderId}`);
     const changeOrderRef = db.collection('change_orders').doc(changeOrderId);
+    const changeOrderSnap = await changeOrderRef.get();
+
+    // Guard: skip if change order has been cancelled
+    if (changeOrderSnap.exists && changeOrderSnap.data()?.status === 'cancelled') {
+      console.log(`Change order ${changeOrderId} is cancelled — skipping signed update`);
+      return;
+    }
 
     await changeOrderRef.update({
       status: 'signed',
@@ -1877,9 +1884,9 @@ export const testSignChangeOrder = functions.https.onRequest(async (req, res) =>
       activeChangeOrderStatus: null,
       // Apply the new pricing from change order
       pricing: {
-        subtotalBeforeTax: changeOrderData.newValues?.subtotalBeforeTax || orderData?.pricing?.subtotalBeforeTax,
-        extraMoneyFluff: changeOrderData.newValues?.extraMoneyFluff || orderData?.pricing?.extraMoneyFluff,
-        deposit: changeOrderData.newValues?.deposit || orderData?.pricing?.deposit,
+        subtotalBeforeTax: changeOrderData.newValues?.subtotalBeforeTax ?? orderData?.pricing?.subtotalBeforeTax,
+        extraMoneyFluff: changeOrderData.newValues?.extraMoneyFluff ?? orderData?.pricing?.extraMoneyFluff,
+        deposit: changeOrderData.newValues?.deposit ?? orderData?.pricing?.deposit,
       },
       updatedAt: admin.firestore.FieldValue.serverTimestamp(),
     });

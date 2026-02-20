@@ -486,9 +486,22 @@ export const cancelOrder = functions.https.onRequest(async (req, res) => {
 
   if (!orderId) { res.status(400).json({ error: 'orderId is required' }); return; }
   if (!cancelReason) { res.status(400).json({ error: 'cancelReason is required' }); return; }
+  if (!cancelledByEmail) { res.status(400).json({ error: 'cancelledByEmail is required' }); return; }
 
   try {
     const db = admin.firestore();
+
+    // Verify caller is a manager or admin
+    const roleDoc = await db.collection('user_roles').doc(cancelledByEmail).get();
+    if (!roleDoc.exists) {
+      res.status(403).json({ error: 'Not authorized to cancel orders' });
+      return;
+    }
+    const callerRole = roleDoc.data()?.role;
+    if (callerRole !== 'manager' && callerRole !== 'admin') {
+      res.status(403).json({ error: 'Only managers and admins can cancel orders' });
+      return;
+    }
     const orderRef = db.collection('orders').doc(orderId);
     const orderDoc = await orderRef.get();
 
@@ -648,7 +661,8 @@ export const resendOrderForSignature = functions.https.onRequest(async (req, res
 
     // Forward to sendOrderForSignature via internal HTTP call
     const axios = require('axios');
-    const functionUrl = `https://us-central1-e-sign-27f9a.cloudfunctions.net/sendOrderForSignature`;
+    const projectId = process.env.GCLOUD_PROJECT || process.env.FIREBASE_PROJECT_ID || 'e-sign-27f9a';
+    const functionUrl = `https://us-central1-${projectId}.cloudfunctions.net/sendOrderForSignature`;
     const sendResult = await axios.post(functionUrl, { orderId }, {
       headers: { 'Content-Type': 'application/json' },
     });
