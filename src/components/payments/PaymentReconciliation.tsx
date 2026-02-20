@@ -1,5 +1,4 @@
-import React, { useState } from 'react';
-import { Order } from '../../types/order';
+import React from 'react';
 import {
   PaymentLedgerEntry,
   OrderLedgerSummary,
@@ -15,27 +14,16 @@ import { RefundsSection } from './RefundsSection';
 import { BalanceCard } from './BalanceCard';
 
 interface PaymentReconciliationProps {
-  order: Order;
   ledgerSummary: OrderLedgerSummary;
   ledgerEntries: PaymentLedgerEntry[];
   loading: boolean;
-  onAddPayment: () => void;
-  onRefresh?: () => void;
 }
 
 export function PaymentReconciliation({
-  order: _order,
   ledgerSummary,
   ledgerEntries,
   loading,
-  onAddPayment: _onAddPayment,
-  onRefresh: _onRefresh,
 }: PaymentReconciliationProps) {
-  void _order; // kept in interface for future use
-  void _onAddPayment;
-  void _onRefresh;
-  const [error] = useState<string | null>(null);
-
   const handleViewProof = (entry: PaymentLedgerEntry) => {
     if (entry.proofFile?.downloadUrl) {
       window.open(entry.proofFile.downloadUrl, '_blank');
@@ -68,8 +56,6 @@ export function PaymentReconciliation({
       <div style={styles.header}>
         <h3 style={styles.title}>PAYMENT RECONCILIATION</h3>
       </div>
-
-      {error && <div style={styles.error}>{error}</div>}
 
       {/* Deposit Requirement - only show when there are adjustments */}
       {grouped.depositAdjustments.length > 0 && (
@@ -106,12 +92,6 @@ export function PaymentReconciliation({
         balance={balance}
         balanceStatus={balanceStatus}
       />
-
-
-
-
-
-
     </div>
   );
 }
@@ -139,14 +119,6 @@ const styles: Record<string, React.CSSProperties> = {
     backgroundColor: '#f8f9fa',
     borderRadius: '8px',
     border: '1px solid #e0e0e0',
-  },
-  error: {
-    padding: '12px',
-    backgroundColor: '#ffebee',
-    color: '#c62828',
-    borderRadius: '4px',
-    fontSize: '14px',
-    marginBottom: '16px',
   },
 };
 

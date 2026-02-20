@@ -19,7 +19,8 @@ interface PaymentSectionProps {
   readOnly?: boolean;
 }
 
-export function PaymentSection({ order, onRefresh, readOnly: _readOnly = false }: PaymentSectionProps) {
+export function PaymentSection({ order, onRefresh: _onRefresh, readOnly: _readOnly = false }: PaymentSectionProps) {
+  void _onRefresh;
   void _readOnly;
   const [payments, setPayments] = useState<PaymentRecord[]>([]);
   const [ledgerEntries, setLedgerEntries] = useState<PaymentLedgerEntry[]>([]);
@@ -122,12 +123,9 @@ export function PaymentSection({ order, onRefresh, readOnly: _readOnly = false }
         {error && <div style={styles.error}>{error}</div>}
 
         <PaymentReconciliation
-          order={order}
           ledgerSummary={order.ledgerSummary}
           ledgerEntries={ledgerEntries}
           loading={loading}
-          onAddPayment={() => {}}
-          onRefresh={() => { loadPayments(); onRefresh?.(); }}
         />
       </div>
     );
@@ -290,16 +288,6 @@ const styles: Record<string, React.CSSProperties> = {
     color: '#666',
     textTransform: 'uppercase',
     letterSpacing: '0.5px',
-  },
-  addButton: {
-    padding: '8px 16px',
-    backgroundColor: '#1565c0',
-    color: 'white',
-    border: 'none',
-    borderRadius: '4px',
-    fontSize: '13px',
-    cursor: 'pointer',
-    fontWeight: 500,
   },
   legacyInfo: {
     marginTop: '16px',
