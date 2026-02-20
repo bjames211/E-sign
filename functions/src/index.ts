@@ -1456,6 +1456,96 @@ export const deleteTestOrders = functions.https.onRequest(async (req, res) => {
 });
 
 /**
+ * Purge ALL test data — wipes orders, ledger, audit logs, change orders, esign docs, and resets counters.
+ * Only works when Stripe is in test mode. Requires confirmation phrase.
+ */
+export const purgeAllTestData = functions.https.onRequest(async (req, res) => {
+  res.set('Access-Control-Allow-Origin', '*');
+  res.set('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.set('Access-Control-Allow-Headers', 'Content-Type');
+
+  if (req.method === 'OPTIONS') {
+    res.status(204).send('');
+    return;
+  }
+
+  if (req.method !== 'POST') {
+    res.status(405).json({ error: 'Method not allowed' });
+    return;
+  }
+
+  try {
+    const { confirm } = req.body;
+    if (confirm !== 'DELETE_ALL_TEST_DATA') {
+      res.status(400).json({ error: 'Must send { confirm: "DELETE_ALL_TEST_DATA" } to proceed' });
+      return;
+    }
+
+    // Safety check: only allow in test mode
+    const stripeKey = process.env.STRIPE_SECRET_KEY || '';
+    if (!stripeKey.startsWith('sk_test_')) {
+      res.status(403).json({ error: 'Purge is only allowed when Stripe is in TEST mode' });
+      return;
+    }
+
+    const db = admin.firestore();
+    const stats: Record<string, number> = {};
+
+    // Helper to delete all docs in a collection
+    const purgeCollection = async (collectionName: string) => {
+      let count = 0;
+      const batchSize = 400;
+      let hasMore = true;
+
+      while (hasMore) {
+        const snap = await db.collection(collectionName).limit(batchSize).get();
+        if (snap.empty) {
+          hasMore = false;
+          break;
+        }
+        const batch = db.batch();
+        snap.docs.forEach(doc => batch.delete(doc.ref));
+        await batch.commit();
+        count += snap.size;
+        hasMore = snap.size === batchSize;
+      }
+
+      stats[collectionName] = count;
+    };
+
+    // Purge all collections
+    await purgeCollection('orders');
+    await purgeCollection('payment_ledger');
+    await purgeCollection('payment_audit_log');
+    await purgeCollection('order_audit_log');
+    await purgeCollection('change_orders');
+    await purgeCollection('esign_documents');
+    await purgeCollection('payments');
+    await purgeCollection('order_interactions');
+    await purgeCollection('prepaid_credits');
+    await purgeCollection('reconciliation_reports');
+    await purgeCollection('extracted_pdf_data');
+
+    // Reset counters to 0
+    await db.collection('counters').doc('order_number').set({ current: 0, resetAt: admin.firestore.FieldValue.serverTimestamp() });
+    await db.collection('counters').doc('change_order_number').set({ current: 0, resetAt: admin.firestore.FieldValue.serverTimestamp() });
+    await db.collection('counters').doc('payment_number').set({ current: 0, resetAt: admin.firestore.FieldValue.serverTimestamp() });
+    stats['counters_reset'] = 3;
+
+    console.log('PURGE COMPLETE:', JSON.stringify(stats));
+
+    res.status(200).json({
+      success: true,
+      stats,
+      message: 'All test data purged. Counters reset to 0. Ready for fresh testing.',
+    });
+  } catch (error) {
+    console.error('Purge error:', error);
+    res.status(500).json({ error: error instanceof Error ? error.message : 'Purge failed' });
+  }
+});
+
+/**
  * Admin endpoint to fix change order status
  * Usage: POST /fixChangeOrderStatus { changeOrderId, newStatus }
  */
