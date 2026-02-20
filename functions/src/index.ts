@@ -1282,6 +1282,289 @@ export const approveAndSend = functions.https.onRequest(async (req, res) => {
 });
 
 /**
+ * Create realistic test orders covering all payment scenarios.
+ * POST /seedTestOrder
+ * Body: { scenario: "all" | "paid" | "unpaid" | "partial" | "overpaid" | "refund" | "change_order" | "cancelled" | "manual_pending" }
+ * Default: "all" creates one of each
+ */
+export const seedTestOrder = functions.https.onRequest(async (req, res) => {
+  res.set('Access-Control-Allow-Origin', '*');
+  res.set('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.set('Access-Control-Allow-Headers', 'Content-Type');
+  if (req.method === 'OPTIONS') { res.status(204).send(''); return; }
+  if (req.method !== 'POST') { res.status(405).json({ error: 'Method not allowed' }); return; }
+
+  try {
+    const db = admin.firestore();
+    const { scenario = 'all' } = req.body;
+
+    const manufacturers = ['Eagle Carports', 'American Carports', 'Coast to Coast Carports'];
+    const firstNames = ['James', 'Maria', 'Robert', 'Linda', 'Michael', 'Sarah', 'William', 'Jennifer', 'David', 'Jessica'];
+    const lastNames = ['Johnson', 'Williams', 'Brown', 'Garcia', 'Martinez', 'Davis', 'Rodriguez', 'Wilson', 'Anderson', 'Taylor'];
+    const states = ['TX', 'CA', 'FL', 'AZ', 'GA', 'CO', 'NC', 'OH', 'TN', 'VA'];
+    const pick = <T>(arr: T[]): T => arr[Math.floor(Math.random() * arr.length)];
+    const rand = (min: number, max: number) => Math.floor(Math.random() * (max - min + 1)) + min;
+
+    // Helper: get next order number atomically
+    const getOrderNum = async () => {
+      const ref = db.collection('counters').doc('order_number');
+      const num = await db.runTransaction(async (t) => {
+        const snap = await t.get(ref);
+        const next = (snap.data()?.current || 0) + 1;
+        t.set(ref, { current: next }, { merge: true });
+        return next;
+      });
+      return `ORD-${String(num).padStart(5, '0')}`;
+    };
+
+    // Helper: create a full order document
+    const createOrder = async (opts: {
+      name: string; deposit: number; subtotal: number; status: string;
+      paymentStatus: string; paymentType: string; manufacturer: string;
+    }) => {
+      const orderNumber = await getOrderNum();
+      const [first, last] = opts.name.split(' ');
+      const st = pick(states);
+      const now = admin.firestore.FieldValue.serverTimestamp();
+
+      const orderData: Record<string, unknown> = {
+        orderNumber,
+        status: opts.status,
+        customer: {
+          firstName: first, lastName: last,
+          email: `${first.toLowerCase()}.${last.toLowerCase()}@test.com`,
+          phone: `(555) ${rand(100,999)}-${rand(1000,9999)}`,
+          deliveryAddress: `${rand(100,9999)} ${pick(['Oak','Pine','Maple','Cedar'])} ${pick(['St','Ave','Rd','Dr'])}`,
+          state: st, zip: String(rand(10000, 99999)),
+        },
+        building: {
+          manufacturer: opts.manufacturer, buildingType: pick(['Garage','Carport','Barn','Workshop']),
+          overallWidth: `${pick([20,24,26,30])}'`, buildingLength: `${pick([20,24,30,36,40])}'`,
+          baseRailLength: `${pick([20,24,30])}'`, buildingHeight: `${pick([8,10,12,14])}'`,
+          lullLiftRequired: false, foundationType: 'Concrete', permittingStructure: 'Standard', drawingType: 'Standard',
+          customerLandIsReady: true,
+        },
+        pricing: { subtotalBeforeTax: opts.subtotal, extraMoneyFluff: 0, deposit: opts.deposit },
+        originalPricing: { subtotalBeforeTax: opts.subtotal, extraMoneyFluff: 0, deposit: opts.deposit },
+        payment: { type: opts.paymentType, status: opts.paymentStatus },
+        files: { renderings: [], extraFiles: [], installerFiles: [] },
+        salesPerson: 'Test Sales Rep',
+        orderFormName: `${first} ${last} - ${opts.manufacturer}`,
+        paymentNotes: '', referredBy: '', specialNotes: '',
+        isTestMode: true,
+        createdBy: 'seed-test',
+        createdAt: now, updatedAt: now,
+      };
+
+      if (opts.paymentStatus === 'paid') {
+        orderData.paidAt = now;
+      }
+
+      const ref = await db.collection('orders').add(orderData);
+      return { id: ref.id, orderNumber, ref };
+    };
+
+    // Helper: add ledger entry with proper payment number
+    const addEntry = async (opts: {
+      orderId: string; orderNumber: string; amount: number;
+      type: string; method: string; category: string; status: string;
+      description: string; customerName: string;
+    }) => {
+      const payRef = db.collection('counters').doc('payment_number');
+      const payNum = await db.runTransaction(async (t) => {
+        const snap = await t.get(payRef);
+        const next = (snap.data()?.current || 0) + 1;
+        t.set(payRef, { current: next }, { merge: true });
+        return next;
+      });
+      const paymentNumber = `PAY-${String(payNum).padStart(5, '0')}`;
+
+      const entry: Record<string, unknown> = {
+        orderId: opts.orderId, orderNumber: opts.orderNumber,
+        paymentNumber, transactionType: opts.type, amount: opts.amount,
+        method: opts.method, category: opts.category, status: opts.status,
+        description: opts.description, createdBy: 'seed-test',
+        customerName: opts.customerName,
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      };
+      if (opts.method === 'stripe' && opts.status === 'verified') {
+        entry.stripePaymentId = `test_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`;
+        entry.stripeVerified = true;
+      }
+      await db.collection('payment_ledger').add(entry);
+      return paymentNumber;
+    };
+
+    // Helper: recalculate ledger summary via the shared function
+    const { updateOrderLedgerSummary } = await import('./paymentLedgerFunctions');
+    const recalc = async (orderId: string) => {
+      await updateOrderLedgerSummary(orderId, db);
+    };
+
+    const created: { orderNumber: string; scenario: string; description: string }[] = [];
+
+    const scenarios: Record<string, () => Promise<void>> = {
+      // 1. Fully paid via Stripe
+      paid: async () => {
+        const deposit = rand(3, 8) * 1000;
+        const o = await createOrder({ name: `${pick(firstNames)} ${pick(lastNames)}`, deposit, subtotal: deposit * 5,
+          status: 'signed', paymentStatus: 'paid', paymentType: 'stripe_already_paid', manufacturer: pick(manufacturers) });
+        await addEntry({ orderId: o.id, orderNumber: o.orderNumber, amount: deposit, type: 'payment', method: 'stripe',
+          category: 'initial_deposit', status: 'verified', description: 'Stripe payment - fully paid',
+          customerName: `Customer ${o.orderNumber}` });
+        await recalc(o.id);
+        created.push({ orderNumber: o.orderNumber, scenario: 'paid', description: `Fully paid $${deposit} via Stripe` });
+      },
+
+      // 2. Unpaid — awaiting payment
+      unpaid: async () => {
+        const deposit = rand(3, 8) * 1000;
+        const o = await createOrder({ name: `${pick(firstNames)} ${pick(lastNames)}`, deposit, subtotal: deposit * 5,
+          status: 'pending_payment', paymentStatus: 'pending', paymentType: 'stripe_pay_later', manufacturer: pick(manufacturers) });
+        await recalc(o.id);
+        created.push({ orderNumber: o.orderNumber, scenario: 'unpaid', description: `Awaiting $${deposit} payment` });
+      },
+
+      // 3. Partial payment — underpaid
+      partial: async () => {
+        const deposit = rand(5, 10) * 1000;
+        const paid = Math.round(deposit * 0.5);
+        const o = await createOrder({ name: `${pick(firstNames)} ${pick(lastNames)}`, deposit, subtotal: deposit * 5,
+          status: 'pending_payment', paymentStatus: 'pending', paymentType: 'stripe_already_paid', manufacturer: pick(manufacturers) });
+        await addEntry({ orderId: o.id, orderNumber: o.orderNumber, amount: paid, type: 'payment', method: 'stripe',
+          category: 'initial_deposit', status: 'verified', description: `Partial payment ($${paid} of $${deposit})`,
+          customerName: `Customer ${o.orderNumber}` });
+        await recalc(o.id);
+        created.push({ orderNumber: o.orderNumber, scenario: 'partial', description: `Paid $${paid} of $${deposit} — underpaid $${deposit - paid}` });
+      },
+
+      // 4. Overpaid
+      overpaid: async () => {
+        const deposit = rand(3, 6) * 1000;
+        const paid = deposit + rand(5, 20) * 100;
+        const o = await createOrder({ name: `${pick(firstNames)} ${pick(lastNames)}`, deposit, subtotal: deposit * 5,
+          status: 'signed', paymentStatus: 'paid', paymentType: 'stripe_already_paid', manufacturer: pick(manufacturers) });
+        await addEntry({ orderId: o.id, orderNumber: o.orderNumber, amount: paid, type: 'payment', method: 'stripe',
+          category: 'initial_deposit', status: 'verified', description: `Overpayment ($${paid} for $${deposit} deposit)`,
+          customerName: `Customer ${o.orderNumber}` });
+        await recalc(o.id);
+        created.push({ orderNumber: o.orderNumber, scenario: 'overpaid', description: `Paid $${paid} on $${deposit} deposit — overpaid $${paid - deposit}` });
+      },
+
+      // 5. Paid then refunded
+      refund: async () => {
+        const deposit = rand(4, 8) * 1000;
+        const refundAmt = rand(5, 15) * 100;
+        const o = await createOrder({ name: `${pick(firstNames)} ${pick(lastNames)}`, deposit, subtotal: deposit * 5,
+          status: 'signed', paymentStatus: 'paid', paymentType: 'stripe_already_paid', manufacturer: pick(manufacturers) });
+        await addEntry({ orderId: o.id, orderNumber: o.orderNumber, amount: deposit, type: 'payment', method: 'stripe',
+          category: 'initial_deposit', status: 'verified', description: 'Initial deposit',
+          customerName: `Customer ${o.orderNumber}` });
+        await addEntry({ orderId: o.id, orderNumber: o.orderNumber, amount: refundAmt, type: 'refund', method: 'stripe',
+          category: 'refund', status: 'approved', description: `Refund of $${refundAmt}`,
+          customerName: `Customer ${o.orderNumber}` });
+        await recalc(o.id);
+        created.push({ orderNumber: o.orderNumber, scenario: 'refund', description: `Paid $${deposit}, refunded $${refundAmt} — net $${deposit - refundAmt}` });
+      },
+
+      // 6. Change order with deposit increase
+      change_order: async () => {
+        const deposit = rand(3, 6) * 1000;
+        const newDeposit = deposit + rand(1, 3) * 1000;
+        const o = await createOrder({ name: `${pick(firstNames)} ${pick(lastNames)}`, deposit, subtotal: deposit * 5,
+          status: 'signed', paymentStatus: 'paid', paymentType: 'stripe_already_paid', manufacturer: pick(manufacturers) });
+        // Initial payment
+        await addEntry({ orderId: o.id, orderNumber: o.orderNumber, amount: deposit, type: 'payment', method: 'stripe',
+          category: 'initial_deposit', status: 'verified', description: 'Initial deposit',
+          customerName: `Customer ${o.orderNumber}` });
+        // Create change order
+        const coRef = db.collection('counters').doc('change_order_number');
+        const coNum = await db.runTransaction(async (t) => {
+          const snap = await t.get(coRef);
+          const next = (snap.data()?.current || 0) + 1;
+          t.set(coRef, { current: next }, { merge: true });
+          return next;
+        });
+        const coNumber = `CO-${String(coNum).padStart(5, '0')}`;
+        const coDocRef = await db.collection('change_orders').add({
+          changeOrderNumber: coNumber, orderId: o.id, orderNumber: o.orderNumber,
+          status: 'signed',
+          previousValues: { deposit, subtotalBeforeTax: deposit * 5, extraMoneyFluff: 0 },
+          newValues: { deposit: newDeposit, subtotalBeforeTax: newDeposit * 5, extraMoneyFluff: 0 },
+          differences: { depositDiff: newDeposit - deposit, subtotalDiff: (newDeposit - deposit) * 5 },
+          reason: 'Customer requested larger building',
+          createdBy: 'seed-test',
+          createdAt: admin.firestore.FieldValue.serverTimestamp(),
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+        // Deposit increase entry
+        await addEntry({ orderId: o.id, orderNumber: o.orderNumber, amount: newDeposit - deposit, type: 'deposit_increase', method: 'other',
+          category: 'change_order_adjustment', status: 'approved', description: `Deposit increase from ${coNumber}`,
+          customerName: `Customer ${o.orderNumber}` });
+        // Additional payment for the increase
+        await addEntry({ orderId: o.id, orderNumber: o.orderNumber, amount: newDeposit - deposit, type: 'payment', method: 'check',
+          category: 'change_order_adjustment', status: 'pending', description: `Additional deposit for ${coNumber} — pending`,
+          customerName: `Customer ${o.orderNumber}` });
+        // Update order pricing + CO link
+        await o.ref.update({
+          'pricing.deposit': newDeposit, 'pricing.subtotalBeforeTax': newDeposit * 5,
+          activeChangeOrderId: coDocRef.id, activeChangeOrderStatus: 'signed',
+          hasChangeOrders: true, changeOrderCount: 1,
+        });
+        await recalc(o.id);
+        created.push({ orderNumber: o.orderNumber, scenario: 'change_order',
+          description: `Paid $${deposit}, CO increases deposit to $${newDeposit} (+$${newDeposit - deposit} pending)` });
+      },
+
+      // 7. Cancelled order
+      cancelled: async () => {
+        const deposit = rand(3, 7) * 1000;
+        const o = await createOrder({ name: `${pick(firstNames)} ${pick(lastNames)}`, deposit, subtotal: deposit * 5,
+          status: 'cancelled', paymentStatus: 'paid', paymentType: 'stripe_already_paid', manufacturer: pick(manufacturers) });
+        await addEntry({ orderId: o.id, orderNumber: o.orderNumber, amount: deposit, type: 'payment', method: 'stripe',
+          category: 'initial_deposit', status: 'verified', description: 'Initial deposit (before cancellation)',
+          customerName: `Customer ${o.orderNumber}` });
+        await o.ref.update({
+          previousStatus: 'signed',
+          cancelledAt: admin.firestore.FieldValue.serverTimestamp(),
+          cancelledBy: 'seed-test', cancelledByEmail: 'admin@test.com',
+          cancelReason: 'Customer changed their mind — test cancellation',
+        });
+        await recalc(o.id);
+        created.push({ orderNumber: o.orderNumber, scenario: 'cancelled', description: `Cancelled order — $${deposit} payment remains on ledger` });
+      },
+
+      // 8. Manual payment pending approval
+      manual_pending: async () => {
+        const deposit = rand(3, 7) * 1000;
+        const method = pick(['check', 'wire', 'cash'] as const);
+        const o = await createOrder({ name: `${pick(firstNames)} ${pick(lastNames)}`, deposit, subtotal: deposit * 5,
+          status: 'pending_payment', paymentStatus: 'pending', paymentType: method, manufacturer: pick(manufacturers) });
+        await addEntry({ orderId: o.id, orderNumber: o.orderNumber, amount: deposit, type: 'payment', method,
+          category: 'initial_deposit', status: 'pending', description: `${method} payment — awaiting manager approval`,
+          customerName: `Customer ${o.orderNumber}` });
+        await recalc(o.id);
+        created.push({ orderNumber: o.orderNumber, scenario: 'manual_pending', description: `$${deposit} ${method} payment pending approval` });
+      },
+    };
+
+    if (scenario === 'all') {
+      for (const fn of Object.values(scenarios)) { await fn(); }
+    } else if (scenarios[scenario]) {
+      await scenarios[scenario]();
+    } else {
+      res.status(400).json({ error: `Unknown scenario: ${scenario}. Valid: ${Object.keys(scenarios).join(', ')}, all` });
+      return;
+    }
+
+    res.status(200).json({ success: true, created });
+  } catch (error) {
+    console.error('seedTestOrder error:', error);
+    res.status(500).json({ error: error instanceof Error ? error.message : 'Failed to seed test orders' });
+  }
+});
+
+/**
  * HTTP endpoint to seed initial data (admin options and mock quotes)
  * Call once to initialize the system
  */
