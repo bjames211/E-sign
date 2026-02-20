@@ -40,6 +40,7 @@ import {
   migratePaymentNumbers,
   migrateBalanceAfter,
   fixDuplicateOrderNumber,
+  fixDuplicatePaymentNumbers,
   syncOrderNumberCounter,
 } from './paymentLedgerFunctions';
 import {
@@ -112,6 +113,7 @@ export {
   migratePaymentNumbers,
   migrateBalanceAfter,
   fixDuplicateOrderNumber,
+  fixDuplicatePaymentNumbers,
   syncOrderNumberCounter,
 };
 

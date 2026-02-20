@@ -1782,6 +1782,105 @@ export const fixDuplicateOrderNumber = functions.https.onRequest(async (req, res
 });
 
 /**
+ * Fix duplicate payment numbers by reassigning new unique numbers to duplicates.
+ * Keeps the older entry (by createdAt) and reassigns the newer one.
+ * Also syncs the payment_number counter to the highest existing number.
+ */
+export const fixDuplicatePaymentNumbers = functions.https.onRequest(async (req, res) => {
+  res.set('Access-Control-Allow-Origin', '*');
+  res.set('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.set('Access-Control-Allow-Headers', 'Content-Type');
+
+  if (req.method === 'OPTIONS') {
+    res.status(204).send('');
+    return;
+  }
+
+  if (req.method !== 'POST') {
+    res.status(405).json({ error: 'Method not allowed' });
+    return;
+  }
+
+  try {
+    const db = admin.firestore();
+    const { dryRun = true } = req.body;
+
+    // Get all ledger entries
+    const snapshot = await db.collection('payment_ledger').orderBy('createdAt', 'asc').get();
+
+    // Group by paymentNumber
+    const byNumber: Record<string, { id: string; createdAt: number }[]> = {};
+    snapshot.docs.forEach(doc => {
+      const data = doc.data();
+      const pn = data.paymentNumber;
+      if (!pn) return;
+      const created = data.createdAt?.toMillis?.() || data.createdAt?._seconds * 1000 || 0;
+      if (!byNumber[pn]) byNumber[pn] = [];
+      byNumber[pn].push({ id: doc.id, createdAt: created });
+    });
+
+    // Find duplicates
+    const duplicates: { paymentNumber: string; entryId: string; newNumber?: string }[] = [];
+    for (const [pn, entries] of Object.entries(byNumber)) {
+      if (entries.length <= 1) continue;
+      // Sort by createdAt ascending — keep the first, reassign the rest
+      entries.sort((a, b) => a.createdAt - b.createdAt);
+      for (let i = 1; i < entries.length; i++) {
+        duplicates.push({ paymentNumber: pn, entryId: entries[i].id });
+      }
+    }
+
+    if (duplicates.length === 0) {
+      res.status(200).json({ success: true, message: 'No duplicate payment numbers found', duplicates: 0 });
+      return;
+    }
+
+    // First, sync the counter to the highest existing number
+    let maxNum = 0;
+    snapshot.docs.forEach(doc => {
+      const pn = doc.data().paymentNumber || '';
+      const match = pn.match(/PAY-(\d+)/);
+      if (match) {
+        const num = parseInt(match[1], 10);
+        if (num > maxNum) maxNum = num;
+      }
+    });
+
+    if (!dryRun) {
+      // Set counter to max so generatePaymentNumber starts from max+1
+      await db.collection('counters').doc('payment_number').set({ current: maxNum }, { merge: true });
+
+      // Reassign new numbers to each duplicate
+      for (const dup of duplicates) {
+        const newNumber = await generatePaymentNumber(db);
+        dup.newNumber = newNumber;
+        await db.collection('payment_ledger').doc(dup.entryId).update({ paymentNumber: newNumber });
+      }
+    }
+
+    res.status(200).json({
+      success: true,
+      dryRun,
+      duplicatesFound: duplicates.length,
+      counterSyncedTo: maxNum,
+      reassigned: duplicates.map(d => ({
+        oldNumber: d.paymentNumber,
+        entryId: d.entryId,
+        newNumber: d.newNumber || '(dry run)',
+      })),
+      message: dryRun
+        ? `Dry run: Would reassign ${duplicates.length} duplicate entries. Counter would sync to ${maxNum}.`
+        : `Fixed ${duplicates.length} duplicate payment numbers. Counter synced to ${maxNum}.`,
+    });
+  } catch (error) {
+    console.error('Error fixing duplicate payment numbers:', error);
+    res.status(500).json({
+      error: error instanceof Error ? error.message : 'Failed to fix duplicates',
+    });
+  }
+});
+
+/**
  * Sync order number counter to highest existing order number
  * Run this once to fix counter after duplicate fixes
  */
