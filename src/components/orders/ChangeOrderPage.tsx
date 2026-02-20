@@ -385,6 +385,7 @@ export function ChangeOrderPage({
             }),
           }
         );
+        if (!response.ok) throw new Error(`Server error: ${response.status} ${response.statusText}`);
 
         const data = await response.json();
         if (!data.success) {
@@ -435,6 +436,7 @@ export function ChangeOrderPage({
           }),
         }
       );
+      if (!response.ok) throw new Error(`Server error: ${response.status} ${response.statusText}`);
 
       const data = await response.json();
 
@@ -486,6 +488,7 @@ export function ChangeOrderPage({
           }),
         }
       );
+      if (!response.ok) throw new Error(`Server error: ${response.status} ${response.statusText}`);
 
       const data = await response.json();
 

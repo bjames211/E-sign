@@ -79,6 +79,7 @@ export function PaymentSection({
           }),
         }
       );
+      if (!response.ok) throw new Error(`Server error: ${response.status} ${response.statusText}`);
 
       const data = await response.json();
       if (data.clientSecret) {
@@ -115,6 +116,7 @@ export function PaymentSection({
           }),
         }
       );
+      if (!response.ok) throw new Error(`Server error: ${response.status} ${response.statusText}`);
 
       const data = await response.json();
       if (data.verified) {
@@ -154,6 +156,7 @@ export function PaymentSection({
           }),
         }
       );
+      if (!response.ok) throw new Error(`Server error: ${response.status} ${response.statusText}`);
 
       const data = await response.json();
       if (data.url) {

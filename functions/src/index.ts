@@ -1535,10 +1535,23 @@ export const setUserRole = functions.https.onRequest(async (req, res) => {
   }
 
   try {
-    const { email, role } = req.body;
+    const { email, role, callerEmail } = req.body;
 
     if (!email || !role) {
       res.status(400).json({ error: 'email and role are required' });
+      return;
+    }
+
+    if (!callerEmail) {
+      res.status(400).json({ error: 'callerEmail is required for authorization' });
+      return;
+    }
+
+    // Verify caller is an admin
+    const db = admin.firestore();
+    const callerRoleDoc = await db.collection('user_roles').doc(callerEmail).get();
+    if (!callerRoleDoc.exists || callerRoleDoc.data()?.role !== 'admin') {
+      res.status(403).json({ error: 'Only admins can set user roles' });
       return;
     }
 
@@ -1548,7 +1561,6 @@ export const setUserRole = functions.https.onRequest(async (req, res) => {
       return;
     }
 
-    const db = admin.firestore();
     await db.collection('user_roles').doc(email).set({
       email,
       role,

@@ -178,6 +178,7 @@ export function OrdersList({ onNavigateToChangeOrder, initialOrderNumber, onInit
         }),
       }
     );
+    if (!response.ok) throw new Error(`Server error: ${response.status} ${response.statusText}`);
 
     const data = await response.json();
 
@@ -273,6 +274,7 @@ export function OrdersList({ onNavigateToChangeOrder, initialOrderNumber, onInit
         body: JSON.stringify({ orderId }),
       }
     );
+    if (!response.ok) throw new Error(`Server error: ${response.status} ${response.statusText}`);
 
     const data = await response.json();
 

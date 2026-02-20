@@ -601,6 +601,7 @@ export async function recalculateLedgerSummary(orderId: string): Promise<OrderLe
       body: JSON.stringify({ orderId }),
     }
   );
+  if (!response.ok) throw new Error(`Server error: ${response.status} ${response.statusText}`);
 
   const data = await response.json();
 
@@ -626,6 +627,7 @@ export async function addLedgerEntry(
       body: JSON.stringify(data),
     }
   );
+  if (!response.ok) throw new Error(`Server error: ${response.status} ${response.statusText}`);
 
   const result = await response.json();
 
@@ -653,6 +655,7 @@ export async function voidLedgerEntry(
       body: JSON.stringify({ entryId, voidedBy, voidReason }),
     }
   );
+  if (!response.ok) throw new Error(`Server error: ${response.status} ${response.statusText}`);
 
   const data = await response.json();
 
@@ -810,6 +813,7 @@ export async function getAllPayments(
       headers: { 'Content-Type': 'application/json' },
     }
   );
+  if (!response.ok) throw new Error(`Server error: ${response.status} ${response.statusText}`);
 
   const data = await response.json();
 
@@ -837,6 +841,7 @@ export async function getPaymentAuditHistory(
       headers: { 'Content-Type': 'application/json' },
     }
   );
+  if (!response.ok) throw new Error(`Server error: ${response.status} ${response.statusText}`);
 
   const data = await response.json();
 
@@ -860,6 +865,7 @@ export async function getOrderAuditHistory(
       headers: { 'Content-Type': 'application/json' },
     }
   );
+  if (!response.ok) throw new Error(`Server error: ${response.status} ${response.statusText}`);
 
   const data = await response.json();
 

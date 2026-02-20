@@ -317,6 +317,7 @@ export function OrderDetails({
             }),
           }
         );
+        if (!response.ok) throw new Error(`Server error: ${response.status} ${response.statusText}`);
 
         const data = await response.json();
 
@@ -413,6 +414,7 @@ export function OrderDetails({
           body: JSON.stringify({ orderId: order.id }),
         }
       );
+      if (!response.ok) throw new Error(`Server error: ${response.status} ${response.statusText}`);
 
       const data = await response.json();
       if (!data.success) {
@@ -444,6 +446,7 @@ export function OrderDetails({
           body: JSON.stringify({ changeOrderId }),
         }
       );
+      if (!response.ok) throw new Error(`Server error: ${response.status} ${response.statusText}`);
 
       const data = await response.json();
       if (!data.success) {
@@ -539,6 +542,7 @@ export function OrderDetails({
           body: JSON.stringify({ changeOrderId: activeChangeOrder.id }),
         }
       );
+      if (!response.ok) throw new Error(`Server error: ${response.status} ${response.statusText}`);
 
       const data = await response.json();
 

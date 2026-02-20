@@ -479,6 +479,7 @@ export async function cancelChangeOrder(
           body: JSON.stringify({ orderId: changeOrder.orderId }),
         }
       );
+      if (!response.ok) throw new Error(`Server error: ${response.status}`);
       const result = await response.json();
       if (!result.success) {
         console.warn('Failed to cancel SignNow invite:', result.error);

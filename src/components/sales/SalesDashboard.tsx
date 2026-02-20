@@ -484,6 +484,7 @@ export function SalesDashboard({ onNavigateToChangeOrder }: SalesDashboardProps)
         body: JSON.stringify({ orderId, managerApprovalCode, paymentApprovalCode: managerApprovalCode, testMode }),
       }
     );
+    if (!response.ok) throw new Error(`Server error: ${response.status} ${response.statusText}`);
     const data = await response.json();
 
     if (data.requiresManagerApproval || data.requiresPaymentApproval || data.savedAsDraft) {
@@ -513,6 +514,7 @@ export function SalesDashboard({ onNavigateToChangeOrder }: SalesDashboardProps)
         body: JSON.stringify({ orderId }),
       }
     );
+    if (!response.ok) throw new Error(`Server error: ${response.status} ${response.statusText}`);
     const data = await response.json();
     if (!data.success) {
       throw new Error(data.error || 'Failed to cancel signature');
@@ -539,6 +541,7 @@ export function SalesDashboard({ onNavigateToChangeOrder }: SalesDashboardProps)
           body: JSON.stringify({ orderId }),
         }
       );
+      if (!response.ok) throw new Error(`Server error: ${response.status} ${response.statusText}`);
       const data = await response.json();
       if (data.success) {
         alert(`Signature request resent for ${orderNumber}`);
@@ -568,6 +571,7 @@ export function SalesDashboard({ onNavigateToChangeOrder }: SalesDashboardProps)
           body: JSON.stringify({ orderId }),
         }
       );
+      if (!response.ok) throw new Error(`Server error: ${response.status} ${response.statusText}`);
       const data = await response.json();
       if (data.success) {
         alert(`Reminder sent for ${orderNumber}`);

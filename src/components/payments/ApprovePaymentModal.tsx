@@ -86,6 +86,7 @@ export function ApprovePaymentModal({
           body: JSON.stringify({ paymentId: stripePaymentId }),
         }
       );
+      if (!response.ok) throw new Error(`Server error: ${response.status} ${response.statusText}`);
 
       const data = await response.json();
 

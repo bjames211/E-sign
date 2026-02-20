@@ -360,6 +360,7 @@ export function ManagerPayments() {
           body: JSON.stringify({}),
         }
       );
+      if (!response.ok) throw new Error(`Server error: ${response.status} ${response.statusText}`);
 
       const data = await response.json();
 
@@ -479,6 +480,7 @@ export function ManagerPayments() {
           body: JSON.stringify({ orderId }),
         }
       );
+      if (!response.ok) throw new Error(`Server error: ${response.status} ${response.statusText}`);
 
       const data = await response.json();
 
@@ -590,6 +592,7 @@ export function ManagerPayments() {
         throw new Error('Invalid approval state');
       }
 
+      if (!response.ok) throw new Error(`Server error: ${response.status} ${response.statusText}`);
       const data = await response.json();
 
       if (!data.success) {
@@ -751,6 +754,7 @@ export function ManagerPayments() {
       });
 
       console.log('Response status:', response.status);
+      if (!response.ok) throw new Error(`Server error: ${response.status} ${response.statusText}`);
       const data = await response.json();
       console.log('Response data:', data);
 

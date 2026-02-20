@@ -44,6 +44,7 @@ export function SignatureFieldPreview({ pdfUrl, templateId, scale = 1.0 }: Signa
         const response = await fetch(
           `${import.meta.env.VITE_FUNCTIONS_URL || ''}/getTemplateFields?templateId=${encodeURIComponent(templateId)}`
         );
+        if (!response.ok) throw new Error(`Server error: ${response.status} ${response.statusText}`);
         const data = await response.json();
         if (data.error) throw new Error(data.error);
         setFields(data.fields || []);

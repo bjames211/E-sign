@@ -72,6 +72,7 @@ export function PdfExtractionTest() {
           }),
         }
       );
+      if (!response.ok) throw new Error(`Server error: ${response.status} ${response.statusText}`);
 
       const data = await response.json();
       if (data.error) throw new Error(data.error);

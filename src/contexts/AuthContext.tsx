@@ -69,13 +69,12 @@ export function AuthProvider({ children }: AuthProviderProps) {
             setUserRole(data.role as UserRole);
             setUserName(data.name || null);
           } else {
-            // Default to admin if no role set (for initial setup/testing)
-            // Change to 'sales_rep' in production
-            setUserRole('admin');
+            // Default to least-privilege role if no role document exists
+            setUserRole('sales_rep');
           }
         } catch (err) {
           console.error('Error fetching user role:', err);
-          setUserRole('admin'); // Default to admin for testing
+          setUserRole('sales_rep'); // Default to least-privilege
         }
       } else {
         setUserRole(null);

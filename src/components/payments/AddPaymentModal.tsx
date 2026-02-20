@@ -92,6 +92,7 @@ export function AddPaymentModal({
           body: JSON.stringify({ paymentId: formData.stripePaymentId }),
         }
       );
+      if (!response.ok) throw new Error(`Server error: ${response.status} ${response.statusText}`);
 
       const data = await response.json();
 

@@ -3,11 +3,11 @@ service cloud.firestore {
   match /databases/{database}/documents {
 
     // Helper: get user role from user_roles collection (keyed by email)
-    // Defaults to 'admin' if no user_roles doc exists (bootstrap / unlisted users)
+    // Defaults to 'sales_rep' (least privilege) if no user_roles doc exists
     function getUserRole() {
       return exists(/databases/$(database)/documents/user_roles/$(request.auth.token.email))
         ? get(/databases/$(database)/documents/user_roles/$(request.auth.token.email)).data.role
-        : 'admin';
+        : 'sales_rep';
     }
 
     function isAuthenticated() {
@@ -73,12 +73,10 @@ service cloud.firestore {
       allow delete: if false;
     }
 
-    // Payment Ledger - authenticated read/create/update, never delete (void instead)
+    // Payment Ledger - read only for clients, all writes via Cloud Functions (Admin SDK)
     match /payment_ledger/{entryId} {
       allow read: if isAuthenticated();
-      allow create: if isAuthenticated();
-      allow update: if isAuthenticated();
-      allow delete: if false;
+      allow create, update, delete: if false;
     }
 
     // User roles - all authenticated read, only admins write
