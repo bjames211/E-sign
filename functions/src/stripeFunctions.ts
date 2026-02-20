@@ -773,7 +773,7 @@ export const approveManualPayment = functions.https.onRequest(async (req, res) =
 
   try {
     const db = admin.firestore();
-    const { orderId, approvalCode, approvedBy, notes, proofFile, amount } = req.body;
+    const { orderId, approvalCode, approvedBy, approvedByEmail, approvedByRole, notes, proofFile, amount } = req.body;
 
     if (!orderId) {
       res.status(400).json({ error: 'Order ID is required' });
@@ -786,10 +786,27 @@ export const approveManualPayment = functions.https.onRequest(async (req, res) =
       return;
     }
 
-    // Verify manager approval code
-    if (!isValidApprovalCode(approvalCode)) {
-      res.status(403).json({ error: 'Invalid manager approval code' });
-      return;
+    // Allow approval if user is a manager/admin OR has valid approval code
+    let isAuthorized = false;
+    let resolvedApprovedBy = approvedBy || 'Manager';
+
+    if (approvedByEmail && (approvedByRole === 'manager' || approvedByRole === 'admin')) {
+      const roleSnap = await db.collection('user_roles').where('email', '==', approvedByEmail).limit(1).get();
+      if (!roleSnap.empty) {
+        const roleData = roleSnap.docs[0].data();
+        if (roleData.role === 'manager' || roleData.role === 'admin') {
+          isAuthorized = true;
+          resolvedApprovedBy = approvedByEmail;
+        }
+      }
+    }
+
+    if (!isAuthorized) {
+      if (!isValidApprovalCode(approvalCode)) {
+        res.status(403).json({ error: 'Invalid manager approval code' });
+        return;
+      }
+      resolvedApprovedBy = approvedBy || 'Manager (code)';
     }
 
     // Get the order
@@ -837,8 +854,8 @@ export const approveManualPayment = functions.https.onRequest(async (req, res) =
         size: proofFile.size || 0,
         type: proofFile.type || 'image/jpeg',
       },
-      approvedBy: approvedBy || 'Manager',
-      createdBy: approvedBy || 'Manager',
+      approvedBy: resolvedApprovedBy,
+      createdBy: resolvedApprovedBy,
     }, db);
 
     // Now update order - single atomic update combining payment status + order status
@@ -846,7 +863,7 @@ export const approveManualPayment = functions.https.onRequest(async (req, res) =
       'payment.status': 'manually_approved',
       'payment.manualApproval': {
         approved: true,
-        approvedBy: approvedBy || 'Manager',
+        approvedBy: resolvedApprovedBy,
         approvedAt: admin.firestore.FieldValue.serverTimestamp(),
         notes: notes || '',
         proofFile: {

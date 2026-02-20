@@ -19,6 +19,7 @@ import { getChangeOrdersForOrder } from '../../services/changeOrderService';
 import { ChangeOrder } from '../../types/changeOrder';
 import AllPaymentsTab from './AllPaymentsTab';
 import PaymentDetailModal from './PaymentDetailModal';
+import { useAuth } from '../../contexts/AuthContext';
 
 // Tab types
 type TabType = 'dashboard' | 'all-payments' | 'reconciliation' | 'approvals' | 'ledger-viewer';
@@ -73,6 +74,7 @@ interface OrderWithIssue {
 }
 
 export function ManagerPayments() {
+  const { user, userRole, isManager } = useAuth();
   const [activeTab, setActiveTab] = useState<TabType>('dashboard');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -513,7 +515,8 @@ export function ManagerPayments() {
 
   // Handle payment approval
   const handleApprovePayment = async () => {
-    if (!approvalModal || !approvalCode) return;
+    if (!approvalModal) return;
+    if (!isManager && !approvalCode) return;
 
     setApprovingPayment(true);
     setError(null);
@@ -530,8 +533,10 @@ export function ManagerPayments() {
           body: JSON.stringify({
             orderId: approvalModal.orderId,
             orderNumber: approvalModal.orderNumber,
-            approvalCode,
-            approvedBy: 'Manager',
+            approvalCode: isManager ? undefined : approvalCode,
+            approvedBy: user?.email || 'Manager',
+            approvedByEmail: user?.email,
+            approvedByRole: userRole,
             amount: approvalModal.amount,
             method: approvalModal.method,
           }),
@@ -543,8 +548,10 @@ export function ManagerPayments() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             entryId: approvalModal.entry.id,
-            approvalCode,
-            approvedBy: 'Manager',
+            approvalCode: isManager ? undefined : approvalCode,
+            approvedBy: user?.email || 'Manager',
+            approvedByEmail: user?.email,
+            approvedByRole: userRole,
           }),
         });
       } else {
@@ -2222,17 +2229,25 @@ export function ManagerPayments() {
                   </p>
                 )}
               </div>
-              <div style={styles.formGroup}>
-                <label style={styles.label}>Manager Approval Code</label>
-                <input
-                  type="password"
-                  value={approvalCode}
-                  onChange={(e) => setApprovalCode(e.target.value)}
-                  placeholder="Enter approval code"
-                  style={styles.input}
-                  autoFocus
-                />
-              </div>
+              {isManager ? (
+                <div style={styles.formGroup}>
+                  <span style={{ fontSize: '13px', color: '#2e7d32' }}>
+                    Approving as {user?.email}
+                  </span>
+                </div>
+              ) : (
+                <div style={styles.formGroup}>
+                  <label style={styles.label}>Manager Approval Code</label>
+                  <input
+                    type="password"
+                    value={approvalCode}
+                    onChange={(e) => setApprovalCode(e.target.value)}
+                    placeholder="Enter approval code"
+                    style={styles.input}
+                    autoFocus
+                  />
+                </div>
+              )}
             </div>
             <div style={styles.modalActions}>
               <button
@@ -2246,11 +2261,11 @@ export function ManagerPayments() {
               </button>
               <button
                 onClick={handleApprovePayment}
-                disabled={approvingPayment || !approvalCode}
+                disabled={approvingPayment || (!isManager && !approvalCode)}
                 style={{
                   ...styles.submitBtn,
                   backgroundColor: '#4caf50',
-                  opacity: approvingPayment || !approvalCode ? 0.6 : 1,
+                  opacity: approvingPayment || (!isManager && !approvalCode) ? 0.6 : 1,
                 }}
               >
                 {approvingPayment ? 'Approving...' : 'Approve'}

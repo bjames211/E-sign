@@ -15,6 +15,7 @@ import { ChangeOrderCard } from './ChangeOrderCard';
 import { OrderInteractionHistory } from './OrderInteractionHistory';
 import { PaymentSection } from '../payments/PaymentSection';
 import { getOrderAuditLog } from '../../services/orderService';
+import { useAuth } from '../../contexts/AuthContext';
 
 interface ValidationResponse {
   requiresManagerApproval?: boolean;
@@ -109,6 +110,7 @@ export function OrderDetails({
   onRefresh,
   onNavigateToChangeOrder,
 }: OrderDetailsProps) {
+  const { user, userRole, isManager } = useAuth();
   const [sending, setSending] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [cancelling, setCancelling] = useState(false);
@@ -269,7 +271,7 @@ export function OrderDetails({
   };
 
   const handleManagerApprovalSubmit = async () => {
-    if (!managerCode.trim()) {
+    if (!isManager && !managerCode.trim()) {
       setError('Please enter the manager approval code');
       return;
     }
@@ -306,8 +308,10 @@ export function OrderDetails({
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
               orderId: order.id,
-              approvalCode: managerCode,
-              approvedBy: 'Manager',
+              approvalCode: isManager ? undefined : managerCode,
+              approvedBy: user?.email || 'Manager',
+              approvedByEmail: user?.email,
+              approvedByRole: userRole,
               proofFile: uploadedProof,
               amount: amount,
             }),
@@ -1400,13 +1404,19 @@ export function OrderDetails({
             )}
 
             <div style={styles.approvalForm}>
-              <input
-                type="password"
-                value={managerCode}
-                onChange={(e) => setManagerCode(e.target.value)}
-                placeholder="Enter manager approval code"
-                style={styles.approvalInput}
-              />
+              {isManager ? (
+                <span style={{ fontSize: '13px', color: '#2e7d32', marginBottom: 8, display: 'block' }}>
+                  Approving as {user?.email}
+                </span>
+              ) : (
+                <input
+                  type="password"
+                  value={managerCode}
+                  onChange={(e) => setManagerCode(e.target.value)}
+                  placeholder="Enter manager approval code"
+                  style={styles.approvalInput}
+                />
+              )}
               <div style={styles.approvalButtons}>
                 <button
                   onClick={() => {

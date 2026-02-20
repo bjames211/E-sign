@@ -11,6 +11,7 @@ import {
   requiresManualApproval,
   formatCurrency,
 } from '../../types/payment';
+import { useAuth } from '../../contexts/AuthContext';
 
 interface AddPaymentModalProps {
   orderId: string;
@@ -28,6 +29,7 @@ export function AddPaymentModal({
   onSubmit,
   onClose,
 }: AddPaymentModalProps) {
+  const { isManager, user } = useAuth();
   // depositRequired is used for display in the hint
   const [formData, setFormData] = useState<AddPaymentFormData>({
     ...initialAddPaymentFormData,
@@ -373,20 +375,28 @@ export function AddPaymentModal({
                 )}
               </div>
 
-              {/* Manager Approval Code (optional) */}
-              <div style={styles.field}>
-                <label style={styles.label}>
-                  Manager Approval Code
-                  <span style={styles.hint}> (Optional - for instant approval)</span>
-                </label>
-                <input
-                  type="password"
-                  value={formData.approvalCode || ''}
-                  onChange={(e) => setFormData({ ...formData, approvalCode: e.target.value })}
-                  style={styles.input}
-                  placeholder="Enter approval code"
-                />
-              </div>
+              {/* Manager Approval */}
+              {isManager ? (
+                <div style={styles.field}>
+                  <span style={{ fontSize: '13px', color: '#2e7d32' }}>
+                    Will be auto-approved as {user?.email}
+                  </span>
+                </div>
+              ) : (
+                <div style={styles.field}>
+                  <label style={styles.label}>
+                    Manager Approval Code
+                    <span style={styles.hint}> (Optional - for instant approval)</span>
+                  </label>
+                  <input
+                    type="password"
+                    value={formData.approvalCode || ''}
+                    onChange={(e) => setFormData({ ...formData, approvalCode: e.target.value })}
+                    style={styles.input}
+                    placeholder="Enter approval code"
+                  />
+                </div>
+              )}
             </div>
           )}
 

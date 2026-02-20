@@ -352,8 +352,15 @@ export const sendOrderForSignature = functions.https.onRequest(async (req, res) 
     const orderData = { id: orderSnap.id, ...orderSnap.data() } as OrderData;
 
     // Check if manager approval bypass is requested
-    const { managerApprovalCode, paymentApprovalCode, testMode } = req.body;
-    const hasPaymentApproval = paymentApprovalCode ? isValidApprovalCode(paymentApprovalCode) : false;
+    const { managerApprovalCode, paymentApprovalCode, testMode, approvedByEmail, approvedByRole } = req.body;
+    // Check approval via code or manager role
+    let hasPaymentApproval = paymentApprovalCode ? isValidApprovalCode(paymentApprovalCode) : false;
+    if (!hasPaymentApproval && approvedByEmail && (approvedByRole === 'manager' || approvedByRole === 'admin')) {
+      const roleSnap = await admin.firestore().collection('user_roles').where('email', '==', approvedByEmail).limit(1).get();
+      if (!roleSnap.empty && ['manager', 'admin'].includes(roleSnap.docs[0].data().role)) {
+        hasPaymentApproval = true;
+      }
+    }
     // Use test mode if explicitly requested OR if order was created in test mode
     const isTestMode = testMode === true || (orderData as any).isTestMode === true;
 
@@ -613,7 +620,11 @@ export const sendOrderForSignature = functions.https.onRequest(async (req, res) 
       await orderRef.update(paymentUpdateData);
       console.log(`Stripe payment verified for order ${orderId}`);
     }
-    const hasManagerApproval = managerApprovalCode ? isValidApprovalCode(managerApprovalCode) : false;
+    let hasManagerApproval = managerApprovalCode ? isValidApprovalCode(managerApprovalCode) : false;
+    if (!hasManagerApproval && approvedByEmail && (approvedByRole === 'manager' || approvedByRole === 'admin')) {
+      // Already verified role above via hasPaymentApproval check, reuse
+      hasManagerApproval = hasPaymentApproval;
+    }
 
     // Download the PDF from Firebase Storage (we've validated it exists above for non-test mode)
     console.log('Downloading PDF from:', orderData.files.orderFormPdf!.downloadUrl);

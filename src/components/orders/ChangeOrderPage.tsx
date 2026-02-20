@@ -54,7 +54,7 @@ export function ChangeOrderPage({
   onCancel,
   onSendForSignature: _onSendForSignature,
 }: ChangeOrderPageProps) {
-  const { user } = useAuth();
+  const { user, isManager } = useAuth();
   const [mode, setMode] = useState<ChangeOrderMode>('compact');
   const [order, setOrder] = useState<Order | null>(null);
   const [existingChangeOrder, setExistingChangeOrder] = useState<ChangeOrder | null>(null);
@@ -328,9 +328,9 @@ export function ChangeOrderPage({
       else if (paymentType === 'stripe_pay_now') {
         // Payment link will be created during send - no validation needed here
       }
-      // Manual types require manager approval
+      // Manual types require manager approval (skip for logged-in managers)
       else if (['check', 'wire', 'credit_on_file', 'other'].includes(paymentType)) {
-        if (!managerApprovalCode.trim()) {
+        if (!isManager && !managerApprovalCode.trim()) {
           setError('Please enter the manager approval code for manual payment');
           return;
         }
@@ -364,7 +364,9 @@ export function ChangeOrderPage({
         collectNow: collectPaymentNow,
         paymentType: collectPaymentNow ? paymentType : undefined,
         stripePaymentId: collectPaymentNow && isStripeWithId ? stripePaymentId : undefined,
-        managerApprovalCode: collectPaymentNow && isManualPayment ? managerApprovalCode : undefined,
+        managerApprovalCode: collectPaymentNow && isManualPayment && !isManager ? managerApprovalCode : undefined,
+        approvedByEmail: collectPaymentNow && isManualPayment && isManager ? user?.email : undefined,
+        approvedByRole: collectPaymentNow && isManualPayment && isManager ? 'manager' : undefined,
       } : (differences?.depositDiff || 0) < 0 ? {
         depositDifference: depositDiffAmount,
         isRefund: true,
@@ -938,14 +940,22 @@ export function ChangeOrderPage({
                     {/* Manual Payment Types - Check, Wire, Credit on File, Other */}
                     {['check', 'wire', 'credit_on_file', 'other'].includes(paymentType) && (
                       <div style={styles.manualSection}>
-                        <label style={styles.inputLabel}>Manager Approval Code</label>
-                        <input
-                          type="password"
-                          value={managerApprovalCode}
-                          onChange={(e) => setManagerApprovalCode(e.target.value)}
-                          placeholder="Enter approval code"
-                          style={styles.approvalInput}
-                        />
+                        {isManager ? (
+                          <span style={{ fontSize: '13px', color: '#2e7d32' }}>
+                            Will be auto-approved as {user?.email}
+                          </span>
+                        ) : (
+                          <>
+                            <label style={styles.inputLabel}>Manager Approval Code</label>
+                            <input
+                              type="password"
+                              value={managerApprovalCode}
+                              onChange={(e) => setManagerApprovalCode(e.target.value)}
+                              placeholder="Enter approval code"
+                              style={styles.approvalInput}
+                            />
+                          </>
+                        )}
                         <p style={styles.manualNote}>
                           {paymentType === 'check' && 'Check payment will be recorded. Proof can be uploaded in the Payment Section after the change order is sent.'}
                           {paymentType === 'wire' && 'Wire transfer will be recorded. Proof can be uploaded in the Payment Section after the change order is sent.'}

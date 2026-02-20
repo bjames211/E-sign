@@ -145,7 +145,9 @@ export function PaymentSection({ order, onRefresh, readOnly = false }: PaymentSe
       notes: formData.notes || undefined,
       proofFile: proofFile || undefined,
       approvalCode: formData.approvalCode || undefined,
-      createdBy: order.createdBy || 'unknown',
+      approvedByEmail: user?.email,
+      approvedByRole: userRole,
+      createdBy: user?.email || order.createdBy || 'unknown',
     };
 
     const response = await fetch(
