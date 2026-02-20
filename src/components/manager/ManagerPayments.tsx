@@ -942,12 +942,12 @@ export function ManagerPayments() {
                             )}
                             style={{
                               ...styles.actionButton,
-                              backgroundColor: '#4caf50',
+                              backgroundColor: effectiveBalance < 0 ? '#1565c0' : '#4caf50',
                               color: 'white',
                               marginRight: 8,
                             }}
                           >
-                            Approve
+                            {effectiveBalance < 0 ? 'Refund' : 'Collect'}
                           </button>
                         )}
                         <button
@@ -1410,12 +1410,12 @@ export function ManagerPayments() {
                             )}
                             style={{
                               ...styles.actionButton,
-                              backgroundColor: '#4caf50',
+                              backgroundColor: effectiveBalance < 0 ? '#1565c0' : '#4caf50',
                               color: 'white',
                               marginRight: 8,
                             }}
                           >
-                            Approve
+                            {effectiveBalance < 0 ? 'Refund' : 'Collect'}
                           </button>
                         )}
                         <button

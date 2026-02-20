@@ -537,7 +537,7 @@ export function AllPaymentsTab({ onSelectPayment, onApprove }: AllPaymentsTabPro
                           }}
                           style={{
                             padding: '4px 12px',
-                            backgroundColor: '#4caf50',
+                            backgroundColor: (entry.orderBalance || 0) < 0 ? '#1565c0' : '#4caf50',
                             color: 'white',
                             border: 'none',
                             borderRadius: '4px',
@@ -546,7 +546,7 @@ export function AllPaymentsTab({ onSelectPayment, onApprove }: AllPaymentsTabPro
                             fontWeight: 500,
                           }}
                         >
-                          Approve
+                          {(entry.orderBalance || 0) < 0 ? 'Refund' : 'Collect'}
                         </button>
                       ) : (
                         <span style={{ color: '#999' }}>-</span>
