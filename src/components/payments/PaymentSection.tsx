@@ -24,7 +24,8 @@ interface PaymentSectionProps {
   readOnly?: boolean;
 }
 
-export function PaymentSection({ order, onRefresh, readOnly = false }: PaymentSectionProps) {
+export function PaymentSection({ order, onRefresh, readOnly: _readOnly = false }: PaymentSectionProps) {
+  void _readOnly;
   const { user, userRole } = useAuth();
   const [payments, setPayments] = useState<PaymentRecord[]>([]);
   const [ledgerEntries, setLedgerEntries] = useState<PaymentLedgerEntry[]>([]);
@@ -395,14 +396,6 @@ export function PaymentSection({ order, onRefresh, readOnly = false }: PaymentSe
       {/* Payment History Header */}
       <div style={styles.historyHeader}>
         <h4 style={styles.historyTitle}>PAYMENT HISTORY</h4>
-        {!readOnly && (
-          <button
-            onClick={() => setShowAddModal(true)}
-            style={styles.addButton}
-          >
-            + Add Payment
-          </button>
-        )}
       </div>
 
       {/* Payment History Table */}
@@ -513,27 +506,8 @@ export function PaymentSection({ order, onRefresh, readOnly = false }: PaymentSe
         </div>
       )}
 
-      {/* Add Payment Modal */}
-      {showAddModal && order.id && (
-        <AddPaymentModal
-          orderId={order.id}
-          orderNumber={order.orderNumber}
-          depositRequired={depositRequired}
-          currentBalance={currentBalance}
-          onSubmit={handleAddPayment}
-          onClose={() => setShowAddModal(false)}
-        />
-      )}
 
-      {/* Approve Payment Modal */}
-      {paymentToApprove && (
-        <ApprovePaymentModal
-          payment={paymentToApprove}
-          orderNumber={order.orderNumber}
-          onApprove={handleConfirmApprove}
-          onClose={() => setPaymentToApprove(null)}
-        />
-      )}
+
     </div>
   );
 }

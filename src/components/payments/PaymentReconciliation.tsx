@@ -4,7 +4,6 @@ import {
   PaymentLedgerEntry,
   OrderLedgerSummary,
   getBalanceStatus,
-  PAYMENT_METHOD_LABELS,
 } from '../../types/payment';
 import {
   groupLedgerEntriesByType,
@@ -14,7 +13,6 @@ import { DepositRequirementCard } from './DepositRequirementCard';
 import { MoneyReceivedSection } from './MoneyReceivedSection';
 import { RefundsSection } from './RefundsSection';
 import { BalanceCard } from './BalanceCard';
-import { useAuth } from '../../contexts/AuthContext';
 
 interface PaymentReconciliationProps {
   order: Order;
@@ -30,67 +28,17 @@ export function PaymentReconciliation({
   ledgerSummary,
   ledgerEntries,
   loading,
-  onAddPayment,
-  onRefresh,
+  onAddPayment: _onAddPayment,
+  onRefresh: _onRefresh,
 }: PaymentReconciliationProps) {
   void _order; // kept in interface for future use
-  const { user, userRole, isManager } = useAuth();
-  const [error, setError] = useState<string | null>(null);
-  const [approvingId, setApprovingId] = useState<string | null>(null);
-  const [approvalCode, setApprovalCode] = useState<string>('');
-  const [showApprovalModal, setShowApprovalModal] = useState<PaymentLedgerEntry | null>(null);
+  void _onAddPayment;
+  void _onRefresh;
+  const [error] = useState<string | null>(null);
 
   const handleViewProof = (entry: PaymentLedgerEntry) => {
     if (entry.proofFile?.downloadUrl) {
       window.open(entry.proofFile.downloadUrl, '_blank');
-    }
-  };
-
-  const handleApproveClick = (entry: PaymentLedgerEntry) => {
-    setShowApprovalModal(entry);
-    setApprovalCode('');
-  };
-
-  const handleApproveConfirm = async () => {
-    if (!showApprovalModal || !showApprovalModal.id) return;
-    // Require approval code only if not a manager
-    if (!isManager && !approvalCode) return;
-
-    setApprovingId(showApprovalModal.id);
-    setError(null);
-
-    try {
-      const response = await fetch(
-        `${import.meta.env.VITE_FUNCTIONS_URL || ''}/approveLedgerEntry`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            entryId: showApprovalModal.id,
-            approvalCode: isManager ? undefined : approvalCode,
-            approvedBy: user?.email || 'Manager',
-            approvedByEmail: user?.email,
-            approvedByRole: userRole,
-          }),
-        }
-      );
-
-      const data = await response.json();
-
-      if (!data.success) {
-        throw new Error(data.error || 'Failed to approve payment');
-      }
-
-      setShowApprovalModal(null);
-
-      // Trigger parent to reload data (entries + order)
-      if (onRefresh) {
-        onRefresh();
-      }
-    } catch (err: any) {
-      setError(err.message || 'Failed to approve payment');
-    } finally {
-      setApprovingId(null);
     }
   };
 
@@ -138,8 +86,6 @@ export function PaymentReconciliation({
         totalCharged={totals.totalCharged}
         pendingAmount={totals.pendingPayments}
         onViewProof={handleViewProof}
-        onApprove={handleApproveClick}
-        approvingId={approvingId}
       />
 
       {/* Refunds Issued - only show when there are refunds */}
@@ -149,8 +95,6 @@ export function PaymentReconciliation({
           totalRefunded={totals.totalRefunded}
           pendingAmount={totals.pendingRefunds}
           onViewProof={handleViewProof}
-          onApprove={handleApproveClick}
-          approvingId={approvingId}
         />
       )}
 
@@ -163,69 +107,11 @@ export function PaymentReconciliation({
         balanceStatus={balanceStatus}
       />
 
-      {/* Add Payment Button */}
-      <div style={styles.actionRow}>
-        <button onClick={onAddPayment} style={styles.addButton}>
-          + Add Payment
-        </button>
-      </div>
 
-      {/* Approval Modal */}
-      {showApprovalModal && (
-        <div style={styles.modalOverlay}>
-          <div style={styles.modal}>
-            <h4 style={styles.modalTitle}>Approve Payment</h4>
-            <div style={styles.modalContent}>
-              <p style={styles.modalText}>
-                Approve <strong>{PAYMENT_METHOD_LABELS[showApprovalModal.method] || showApprovalModal.method}</strong> payment of{' '}
-                <strong>${showApprovalModal.amount.toFixed(2)}</strong>?
-              </p>
-              {showApprovalModal.proofFile && (
-                <button
-                  onClick={() => handleViewProof(showApprovalModal)}
-                  style={styles.viewProofButton}
-                >
-                  View Proof
-                </button>
-              )}
-              {isManager ? (
-                <div style={styles.modalField}>
-                  <span style={{ fontSize: '13px', color: '#2e7d32' }}>
-                    Approving as {user?.email}
-                  </span>
-                </div>
-              ) : (
-                <div style={styles.modalField}>
-                  <label style={styles.modalLabel}>Manager Approval Code</label>
-                  <input
-                    type="password"
-                    value={approvalCode}
-                    onChange={(e) => setApprovalCode(e.target.value)}
-                    style={styles.modalInput}
-                    placeholder="Enter approval code"
-                    autoFocus
-                  />
-                </div>
-              )}
-            </div>
-            <div style={styles.modalActions}>
-              <button
-                onClick={() => setShowApprovalModal(null)}
-                style={styles.cancelButton}
-              >
-                Cancel
-              </button>
-              <button
-                onClick={handleApproveConfirm}
-                disabled={(!isManager && !approvalCode) || approvingId === showApprovalModal.id}
-                style={styles.confirmButton}
-              >
-                {approvingId === showApprovalModal.id ? 'Approving...' : 'Approve'}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+
+
+
+
     </div>
   );
 }
