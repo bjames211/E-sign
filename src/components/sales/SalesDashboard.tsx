@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { collection, query, orderBy, onSnapshot, Timestamp, limit as firestoreLimit, getDocs, startAfter, QueryDocumentSnapshot, DocumentData, getCountFromServer } from 'firebase/firestore';
+import { collection, query, orderBy, onSnapshot, Timestamp, limit as firestoreLimit, getDocs, startAfter, QueryDocumentSnapshot, DocumentData } from 'firebase/firestore';
 import { db } from '../../config/firebase';
 import { useAuth } from '../../contexts/AuthContext';
 import { Order } from '../../types/order';
@@ -122,7 +122,6 @@ export function SalesDashboard({ onNavigateToChangeOrder }: SalesDashboardProps)
   const SALES_PAGE_SIZE = 100;
   const [lastOrderDoc, setLastOrderDoc] = useState<QueryDocumentSnapshot<DocumentData> | null>(null);
   const [hasMoreOrders, setHasMoreOrders] = useState(false);
-  const [totalOrderCount, setTotalOrderCount] = useState(0);
   const [loadingMore, setLoadingMore] = useState(false);
 
   // Keep filter in sync when forcedSalesPerson changes (e.g. admin switches view-as user)
@@ -139,11 +138,6 @@ export function SalesDashboard({ onNavigateToChangeOrder }: SalesDashboardProps)
       orderBy('createdAt', 'desc'),
       firestoreLimit(SALES_PAGE_SIZE)
     );
-
-    // Get total count
-    getCountFromServer(query(collection(db, 'orders'))).then(snap => {
-      setTotalOrderCount(snap.data().count);
-    });
 
     const unsubscribe = onSnapshot(q, (snapshot) => {
       const ordersData: Order[] = [];
@@ -177,7 +171,8 @@ export function SalesDashboard({ onNavigateToChangeOrder }: SalesDashboardProps)
   useEffect(() => {
     const q = query(
       collection(db, 'change_orders'),
-      orderBy('createdAt', 'desc')
+      orderBy('createdAt', 'desc'),
+      firestoreLimit(500)
     );
 
     const unsubscribe = onSnapshot(q, (snapshot) => {
@@ -1079,7 +1074,7 @@ export function SalesDashboard({ onNavigateToChangeOrder }: SalesDashboardProps)
                 cursor: loadingMore ? 'default' : 'pointer',
               }}
             >
-              {loadingMore ? 'Loading...' : `Load More Orders (${totalOrderCount - orders.length} remaining)`}
+              {loadingMore ? 'Loading...' : 'Load More Orders'}
             </button>
           </div>
         )}

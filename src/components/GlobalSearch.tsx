@@ -29,10 +29,15 @@ export function GlobalSearch({ onSelectOrder, onSelectChangeOrder }: GlobalSearc
   const inputRef = useRef<HTMLInputElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
 
-  // Load data on mount
-  useEffect(() => {
-    loadData();
-  }, []);
+  const [dataLoaded, setDataLoaded] = useState(false);
+
+  // Load data on first focus, not on mount
+  const ensureDataLoaded = async () => {
+    if (!dataLoaded) {
+      setDataLoaded(true);
+      await loadData();
+    }
+  };
 
   // Handle click outside to close
   useEffect(() => {
@@ -52,6 +57,7 @@ export function GlobalSearch({ onSelectOrder, onSelectChangeOrder }: GlobalSearc
         e.preventDefault();
         inputRef.current?.focus();
         setIsOpen(true);
+        ensureDataLoaded();
       }
       if (e.key === 'Escape') {
         setIsOpen(false);
@@ -64,26 +70,18 @@ export function GlobalSearch({ onSelectOrder, onSelectChangeOrder }: GlobalSearc
 
   const loadData = async () => {
     try {
-      // Load orders
-      const ordersQuery = query(
-        collection(db, 'orders'),
-        orderBy('createdAt', 'desc'),
-        limit(500)
-      );
-      const ordersSnapshot = await getDocs(ordersQuery);
+      const ordersQuery = query(collection(db, 'orders'), orderBy('createdAt', 'desc'), limit(200));
+      const coQuery = query(collection(db, 'change_orders'), orderBy('createdAt', 'desc'), limit(200));
+
+      // Run both queries in parallel
+      const [ordersSnapshot, coSnapshot] = await Promise.all([getDocs(ordersQuery), getDocs(coQuery)]);
+
       const ordersData: Order[] = [];
       ordersSnapshot.forEach((doc) => {
         ordersData.push({ ...doc.data(), id: doc.id } as Order);
       });
       setOrders(ordersData);
 
-      // Load change orders
-      const coQuery = query(
-        collection(db, 'change_orders'),
-        orderBy('createdAt', 'desc'),
-        limit(500)
-      );
-      const coSnapshot = await getDocs(coQuery);
       const coData: any[] = [];
       coSnapshot.forEach((doc) => {
         coData.push({ ...doc.data(), id: doc.id });
@@ -218,7 +216,7 @@ export function GlobalSearch({ onSelectOrder, onSelectChangeOrder }: GlobalSearc
             setSearchTerm(e.target.value);
             setIsOpen(true);
           }}
-          onFocus={() => setIsOpen(true)}
+          onFocus={() => { setIsOpen(true); ensureDataLoaded(); }}
           onKeyDown={handleKeyDown}
           placeholder="Search orders... (Cmd+K)"
           style={styles.input}

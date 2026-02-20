@@ -435,11 +435,12 @@ export async function getOrder(orderId: string): Promise<Order | null> {
   } as Order;
 }
 
-// Get all orders
+// Get all orders (limited to prevent unbounded reads)
 export async function getOrders(): Promise<Order[]> {
   const q = query(
     collection(db, ORDERS_COLLECTION),
-    orderBy('createdAt', 'desc')
+    orderBy('createdAt', 'desc'),
+    firestoreLimit(500)
   );
   const querySnapshot = await getDocs(q);
 
@@ -461,16 +462,18 @@ export async function getOrdersPaginated(
   pageSize: number = 50,
   afterDoc?: QueryDocumentSnapshot<DocumentData> | null,
 ): Promise<PaginatedOrdersResult> {
-  // Get total count
-  const countQuery = query(collection(db, ORDERS_COLLECTION));
-  const countSnap = await getCountFromServer(countQuery);
-  const totalCount = countSnap.data().count;
-
-  // Build paginated query
+  // Build paginated query — fetch pageSize+1 to detect hasMore
   const q = afterDoc
     ? query(collection(db, ORDERS_COLLECTION), orderBy('createdAt', 'desc'), startAfter(afterDoc), firestoreLimit(pageSize + 1))
     : query(collection(db, ORDERS_COLLECTION), orderBy('createdAt', 'desc'), firestoreLimit(pageSize + 1));
-  const querySnapshot = await getDocs(q);
+
+  // Only fetch count on first page (afterDoc is null), skip on subsequent pages
+  const [querySnapshot, totalCount] = await Promise.all([
+    getDocs(q),
+    afterDoc
+      ? Promise.resolve(0) // Skip count on pagination — use cached value
+      : getCountFromServer(query(collection(db, ORDERS_COLLECTION))).then(snap => snap.data().count),
+  ]);
 
   const docs = querySnapshot.docs;
   const hasMore = docs.length > pageSize;

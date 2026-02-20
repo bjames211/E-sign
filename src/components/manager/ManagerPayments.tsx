@@ -154,8 +154,8 @@ export function ManagerPayments() {
     setError(null);
 
     try {
-      // Query orders that have ledgerSummary
-      const ordersRef = collection(db, 'orders');
+      // Query orders with a limit to avoid full collection scan
+      const ordersRef = query(collection(db, 'orders'), limit(500));
       const ordersSnap = await getDocs(ordersRef);
 
       const issues: OrderWithIssue[] = [];
@@ -433,37 +433,27 @@ export function ManagerPayments() {
     } else {
       newExpanded.add(orderId);
 
-      // Load transactions if not already loaded
+      // Load transactions and change orders in parallel
+      const promises: Promise<void>[] = [];
+
       if (!orderTransactions[orderId]) {
-        try {
-          const entries = await getLedgerEntriesForOrder(orderId);
-          // Sort newest first
-          entries.sort((a, b) => {
-            const aTime = a.createdAt?.seconds || 0;
-            const bTime = b.createdAt?.seconds || 0;
-            return bTime - aTime;
-          });
-          setOrderTransactions((prev) => ({
-            ...prev,
-            [orderId]: entries,
-          }));
-        } catch (err) {
-          console.error('Failed to load transactions:', err);
-        }
+        promises.push(
+          getLedgerEntriesForOrder(orderId).then((entries) => {
+            entries.sort((a, b) => (b.createdAt?.seconds || 0) - (a.createdAt?.seconds || 0));
+            setOrderTransactions((prev) => ({ ...prev, [orderId]: entries }));
+          }).catch((err) => console.error('Failed to load transactions:', err))
+        );
       }
 
-      // Load change orders if not already loaded
       if (!orderChangeOrders[orderId]) {
-        try {
-          const changeOrders = await getChangeOrdersForOrder(orderId);
-          setOrderChangeOrders((prev) => ({
-            ...prev,
-            [orderId]: changeOrders,
-          }));
-        } catch (err) {
-          console.error('Failed to load change orders:', err);
-        }
+        promises.push(
+          getChangeOrdersForOrder(orderId).then((changeOrders) => {
+            setOrderChangeOrders((prev) => ({ ...prev, [orderId]: changeOrders }));
+          }).catch((err) => console.error('Failed to load change orders:', err))
+        );
       }
+
+      await Promise.all(promises);
     }
 
     setExpandedOrders(newExpanded);

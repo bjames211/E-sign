@@ -1,19 +1,21 @@
-import { useState, useEffect } from 'react';
+import React, { useState, useEffect, Suspense } from 'react';
 import { collection, query, onSnapshot, where, getDocs } from 'firebase/firestore';
 import { db } from './config/firebase';
 import { setDepositConfigs } from './types/order';
 import { AuthProvider, useAuth, ViewAsUser } from './contexts/AuthContext';
 import { Login } from './components/Login';
-import { UploadForm } from './components/UploadForm';
-import { Dashboard } from './components/Dashboard';
 import { OrderForm } from './components/orderForm/OrderForm';
-import { OrdersList } from './components/orders/OrdersList';
-import { ChangeOrdersList } from './components/orders/ChangeOrdersList';
-import { AdminPanel } from './components/admin/AdminPanel';
-import { ChangeOrderPage } from './components/orders/ChangeOrderPage';
-import { ManagerPayments } from './components/manager/ManagerPayments';
-import { SalesDashboard } from './components/sales/SalesDashboard';
 import { GlobalSearch } from './components/GlobalSearch';
+
+// Lazy-load heavy view components — only downloaded when user navigates to them
+const UploadForm = React.lazy(() => import('./components/UploadForm').then(m => ({ default: m.UploadForm })));
+const Dashboard = React.lazy(() => import('./components/Dashboard').then(m => ({ default: m.Dashboard })));
+const OrdersList = React.lazy(() => import('./components/orders/OrdersList').then(m => ({ default: m.OrdersList })));
+const ChangeOrdersList = React.lazy(() => import('./components/orders/ChangeOrdersList').then(m => ({ default: m.ChangeOrdersList })));
+const AdminPanel = React.lazy(() => import('./components/admin/AdminPanel').then(m => ({ default: m.AdminPanel })));
+const ChangeOrderPage = React.lazy(() => import('./components/orders/ChangeOrderPage').then(m => ({ default: m.ChangeOrderPage })));
+const ManagerPayments = React.lazy(() => import('./components/manager/ManagerPayments').then(m => ({ default: m.ManagerPayments })));
+const SalesDashboard = React.lazy(() => import('./components/sales/SalesDashboard').then(m => ({ default: m.SalesDashboard })));
 
 type View = 'upload' | 'dashboard' | 'new-order' | 'orders' | 'change-orders' | 'admin' | 'change-order' | 'manager-payments' | 'sales-dashboard';
 
@@ -319,7 +321,9 @@ function AppContent() {
       </header>
 
       <main style={styles.main}>
-        {renderContent()}
+        <Suspense fallback={<div style={{ padding: 40, textAlign: 'center', color: '#999' }}>Loading...</div>}>
+          {renderContent()}
+        </Suspense>
       </main>
     </div>
   );

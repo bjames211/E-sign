@@ -32,8 +32,20 @@ export function PaymentSection({ order, onRefresh: _onRefresh, readOnly: _readOn
   // Always use ledger system now
   const depositRequired = order.ledgerSummary?.depositRequired || order.pricing?.deposit || 0;
 
+  // If we have a cached ledgerSummary, show it immediately and load entries in background
   useEffect(() => {
     if (order.id) {
+      if (order.ledgerSummary) {
+        // Set summary immediately from cache — no loading spinner for summary
+        setLedgerSummary(order.ledgerSummary);
+        setSummary({
+          totalPaid: order.ledgerSummary.netReceived || 0,
+          totalPending: order.ledgerSummary.pendingReceived || 0,
+          balance: order.ledgerSummary.balance || 0,
+          paymentCount: order.ledgerSummary.entryCount || 0,
+        });
+        setLoading(false);
+      }
       loadPayments();
     }
   }, [order.id]);
